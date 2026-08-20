@@ -1,0 +1,32 @@
+# DiskSense 运行配置（方案书 §3 / §5 / §14）
+# 说明：所有键均可省略，省略时使用代码内置默认值（见 disk_sense/config.py）
+
+server:
+  host: 127.0.0.1   # 仅监听本地回环，绝不暴露到局域网
+  port: 58901
+
+scan:
+  use_mft: true                 # 本地 NTFS 盘优先尝试 MFT 直读（需管理员，失败自动降级）
+  max_workers: null             # os.walk 降级模式线程数；null = max(1, CPU核心数-2)
+  throttle_every: 1000          # 每处理 N 个文件主动让出一次 CPU 时间片
+  throttle_sleep_sec: 0.001
+  default_dir_ignores:          # 扫描时跳过的系统目录（用户忽略模式在 Data/user_preferences.json）
+    - "$RECYCLE.BIN"
+    - "System Volume Information"
+
+scan_api:
+  sync_timeout_sec: 120         # /scan 同步等待上限，超时后返回 scanning 交由客户端轮询 /result
+
+idle:
+  shutdown_timeout_sec: 300     # 空闲自毁阈值（扫描进行中永不触发）
+
+history:
+  retention_days: 30            # SQLite 操作日志保留天数，超期归档至 Data/archive/
+
+report:
+  max_entities: 200             # 指纹档案实体数上限（Token 优化）
+  anomaly_min_mb: 200           # 未归类文件进入 global_anomalies 的体积门槛
+  anomaly_root_min_mb: 50       # 盘符根目录散落文件的更低门槛
+  max_anomalies: 50             # global_anomalies 条目上限
+  treemap_depth: 3              # 仪表盘 Treemap 最大深度
+  treemap_children: 10          # Treemap 每层最多展示的子节点数（其余合并为「其他」）

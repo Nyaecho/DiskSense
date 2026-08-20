@@ -1,0 +1,4 @@
+# 开发与测试依赖
+-r requirements.txt
+pytest>=8.0
+httpx>=0.25        # FastAPI TestClient 所需

@@ -1,0 +1,16 @@
+[project]
+name = "disk-sense"
+version = "1.0.0"
+description = "DiskSense 便携式 AI 磁盘文件管理器（Agent Skill 包）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+
+# 依赖以 requirements.txt 为唯一事实源
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "win32: 仅在 Windows 平台运行的测试（回收站 / 权限相关）",
+]

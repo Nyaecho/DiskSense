@@ -1,0 +1,7 @@
+# 统一换行符：仓库内一律 LF，Windows 检出为 LF（本项目为跨 shell 使用的 Python/HTML）
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.gz  binary
