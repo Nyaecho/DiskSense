@@ -57,13 +57,40 @@ start http://127.0.0.1:58901/
 
 ## 在 Agent 平台使用
 
-**Cline（推荐）**：把整个 `DiskSense/` 目录放入 Cline Skills 目录（或配置指向），
+### cc-switch（推荐，支持一键安装 Skill）
+
+```bash
+# 1. 构建技能包（dist/disk-sense-manager-skill.zip，约 170KB / 24 文件）
+python scripts/package_skill.py
+
+# 2. cc-switch → Skills 页 → 导入 ZIP → 选择该文件
+#    安装到 ~/.cc-switch/skills/ 并 symlink 到 ~/.claude/skills/ 等应用目录
+```
+
+> **不要**直接把整个仓库打成 zip：`.venv/`（上万文件）会撞 cc-switch 的
+> ZIP 条目数上限/解压预算导致安装失败，开发产物也会污染技能目录。
+> cc-switch 的识别规则：解压后递归扫描含 `SKILL.md` 的目录，按 frontmatter
+> 的 `name`（本技能为 `disk-sense-manager`）作为安装名。
+
+### Claude Code（手动）
+
+```bash
+python scripts/package_skill.py
+unzip dist/disk-sense-manager-skill.zip -d ~/.claude/skills/
+```
+
+### Cline
+
+把整个 `DiskSense/` 仓库目录放入 Cline Skills 目录（或配置指向），
 Cline 自动加载 `SKILL.md`。聊天框输入「扫描 C 盘」即可。
 
-**OpenAI Assistant / 自定义 Agent**：把 `SKILL.md` 内容并入 System Prompt，
-注册「执行 Python 脚本」工具（Bash/Code Interpreter）。
+### OpenAI Assistant / 自定义 Agent
 
-**Claude Desktop**：原生 MCP 不支持直接执行脚本，需自行封装 MCP 工具（不推荐，见方案书 §16.2）。
+把 `SKILL.md` 内容并入 System Prompt，注册「执行 Python 脚本」工具
+（Bash/Code Interpreter），技能目录作为 `{SKILL_DIR}` 传入。
+
+**Claude Desktop**：原生 MCP 不支持直接执行脚本，需自行封装 MCP 工具
+（不推荐，见方案书 §16.2）。
 
 Agent 的完整工作流（扫描 → 信号分析 → 仪表盘高亮 → 确认后执行 → 可回滚）
 见 [SKILL.md](SKILL.md)。

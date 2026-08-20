@@ -1,10 +1,15 @@
 ---
 name: disk-sense-manager
 description: 便携式 AI 磁盘文件管理器。用于分析磁盘空间、清理残留、迁移文件、查找重复项或回溯操作。当用户要求分析盘符空间、清理缓存/残留、大文件归档、撤销文件操作时使用。
-allowed-tools: Bash, Python, Read, Write
+allowed-tools: Bash, Read, Write
 ---
 
 # DiskSense 便携磁盘管理器
+
+> **路径约定**：本技能安装在你的技能目录（Claude Code 会在加载技能时提供
+> 本 SKILL.md 所在目录的绝对路径，cc-switch 安装时通常为
+> `~/.claude/skills/disk-sense-manager/`）。下文所有命令中的
+> `{SKILL_DIR}` 都要替换为该绝对路径后再执行。
 
 ## 1. 核心身份与铁律
 
@@ -36,37 +41,37 @@ allowed-tools: Bash, Python, Read, Write
 
 ## 3. 工具函数（通过 `scripts/api_client.py` 调用）
 
-> 所有工具的执行方式：`python scripts/api_client.py {tool} {args}`。
+> 所有工具的执行方式：`python {SKILL_DIR}/scripts/api_client.py {tool} {args}`。
 > 脚本把结果 JSON 打印到 stdout，你读取后继续推理。路径参数含反斜杠时注意 shell 转义（建议 JSON 内用 `\\\\` 或用正斜杠）。
 
 ### 3.1 扫描与查询
 
 - **`start_scan(drive)`**
-  - 命令：`python scripts/api_client.py start_scan --drive C:`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py start_scan --drive C:`
   - 功能：启动磁盘扫描，同步等待完成（内部自动轮询）。
   - 返回：`{"status":"completed","session_id":"...","result":{"entities":[...],"global_anomalies":[...],"summary":{...},"signals_legend":{...}}}`
   - 实体字段：`id`（高亮用）、`display`、`total_size_mb`、`locations.{role}.{size_mb,file_count,has_exe}`、`signals`、`last_access_days`、`top_extensions`、`location_anomaly`、`tags`
 
 - **`query_detail(entity_id, category)`**
-  - 命令：`python scripts/api_client.py query_detail --entity_id wechat --category cache`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py query_detail --entity_id wechat --category cache`
   - `category` ∈ `program_base | user_data | cache | logs`（省略则返回全部角色）
   - 返回：`[{"name":"1.log","path":"...","size":200,"mtime":...}, ...]`（按大小 Top 5）
 
 - **`classify_unknown(path)`**
-  - 命令：`python scripts/api_client.py classify_unknown --path "C:\\unknown.iso"`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py classify_unknown --path "C:\\unknown.iso"`
   - 功能：读文件头 16 字节魔数，返回真实格式（仅特定路径按需查询）。
   - 返回：`{"magic_type":"ISO 9660 光盘镜像","mime":"application/x-iso9660-image","confidence":"high"}`
 
 ### 3.2 可视化操控（Agent 零前端代码，只传参数）
 
 - **`viz_command(action, target, payload)`**
-  - 命令：`python scripts/api_client.py viz_command --action highlight --target '{"id":"wechat"}' --payload '{"color":"#FF4500","label":"卸载残留","effect":"pulse"}'`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py viz_command --action highlight --target '{"id":"wechat"}' --payload '{"color":"#FF4500","label":"卸载残留","effect":"pulse"}'`
   - `action`：`highlight`（霓虹描边+可选标签）| `label`（浮动短文本）| `group`（虚线关联多个实体，target 用 `{"ids":[...]}`）| `protect`（灰色锁定，target 用 `{"path":"D:/Work"}`）| `clear`（清空全部叠加）
 
 ### 3.3 文件操作
 
 - **`execute_operation(op_type, sources, dest)`**
-  - 命令：`python scripts/api_client.py execute_operation --op_type move --sources '["C:\\a.txt"]' --dest "D:\\"`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py execute_operation --op_type move --sources '["C:\\a.txt"]' --dest "D:\\"`
   - `op_type`：`move` | `copy` | `delete` | `compress`
   - **删除自动走回收站**，绝不永久擦除；每次操作返回 `op_uuid`，逐源结果在 `results`
   - 返回：`{"op_uuid":"...","status":"completed","results":[{"source":"...","status":"done","recycle_bin_name":"$R..."}]}`
@@ -74,11 +79,11 @@ allowed-tools: Bash, Python, Read, Write
 ### 3.4 回滚与审计
 
 - **`list_recent_ops(limit)`**
-  - 命令：`python scripts/api_client.py list_recent_ops --limit 10`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py list_recent_ops --limit 10`
   - 返回：`[{"id":1,"op_uuid":"...","op_type":"delete","source_path":"C:\\x","status":"DONE","recycle_bin_name":"$R...","created_at":"..."}]`
 
 - **`undo_operation(op_id)`**
-  - 命令：`python scripts/api_client.py undo_operation --op_id 1`
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py undo_operation --op_id 1`
   - 功能：五步预检（状态锁定→父目录存活→冲突重命名→权限校验→物理还原），按 `op_uuid` 整批回滚，单条失败不阻断。
   - 返回：`{"status":"success|partial|failed","restored":[...],"failed":[...],"skipped":[...]}`
 
