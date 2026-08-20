@@ -237,12 +237,16 @@ class FileOperator:
             entries.append(self._entry(s, size=size, mtime=mtime))
         ids = self.undo.log_batch(op_uuid, "DELETE", entries, self.session_id)
 
-        # 按盘符分组快照回收站（删除前）
-        drive_roots = {}
+        # 按盘符分组快照回收站（删除前）。
+        # 注意 diff/snapshot 均以「盘根」（带分隔符，如 C:\）为键——
+        # Path("C:") 是盘相对路径，与 "$Recycle.Bin" 拼接会得到
+        # "C:$Recycle.Bin"（丢失分隔符）。
+        snapshots: dict[str, dict] = {}
         for s in sources:
             drive = os.path.splitdrive(os.path.abspath(s))[0]
-            if drive and drive not in drive_roots:
-                drive_roots[drive] = _snapshot_recycle_i(drive + os.sep)
+            if drive and drive + os.sep not in snapshots:
+                root = drive + os.sep
+                snapshots[root] = _snapshot_recycle_i(root)
 
         results = []
         try:
@@ -262,8 +266,8 @@ class FileOperator:
         new_items: dict[str, dict] = {}
         for _attempt in range(8):
             new_items = {}
-            for drive, before in drive_roots.items():
-                for m in _diff_new_i(drive, before):
+            for root, before in snapshots.items():
+                for m in _diff_new_i(root, before):
                     new_items[_norm(m["original_path"])] = m
             if len(new_items) >= len(sources):
                 break

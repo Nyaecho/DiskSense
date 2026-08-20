@@ -636,16 +636,21 @@ def create_app(
 # 直跑入口：python disk_sense/server.py 或 python -m disk_sense.server
 # ---------------------------------------------------------------------------
 def _acquire_singleton_lock() -> Optional[Any]:
-    """启动即持有单例锁；获取失败说明已有实例（退出，由既有实例服务）。"""
+    """启动即持有单例锁；获取失败说明已有实例（退出，由既有实例服务）。
+
+    带重试窗口：launcher 短暂持有同一把锁做启动协调，释放后这里立即接棒。
+    """
     from filelock import FileLock, Timeout
 
     ensure_data_dirs()
-    lock = FileLock(str(LOCK_FILE), timeout=0.5)
-    try:
-        lock.acquire(timeout=0.2)
-        return lock
-    except Timeout:
-        return None
+    lock = FileLock(str(LOCK_FILE), timeout=1)
+    for _ in range(12):  # 最长约 12s（launcher 正常在 0.5s 内释放）
+        try:
+            lock.acquire(timeout=1)
+            return lock
+        except Timeout:
+            continue
+    return None
 
 
 def main(argv: Optional[list[str]] = None) -> None:

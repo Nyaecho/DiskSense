@@ -253,6 +253,10 @@ class TestRealRecycleBin:
         # 精确 $R 映射必须被捕获
         assert entry["recycle_bin_name"] and entry["recycle_bin_name"].startswith("$R")
         assert entry["recycle_info_name"] and entry["recycle_info_name"].startswith("$I")
+        # recycle_path 必须是含盘根分隔符的绝对路径（回归防护：
+        # 盘相对路径 "C:$Recycle.Bin\..." 依赖进程 CWD，属未定义行为）
+        drive = os.path.splitdrive(str(target))[0]
+        assert entry["recycle_path"].startswith(drive + "\\$Recycle.Bin\\")
         assert os.path.exists(entry["recycle_path"])
 
         # 撤销 → 文件按原路径还原，$I/$R 消失
