@@ -1,0 +1,33 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- DiskSense 运行时数据（便携原则：全部状态位于 Data/，不入库） ----
+Data/
+
+# ---- 测试与工具缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp
+
+# ---- 操作系统 ----
+Thumbs.db
+desktop.ini
+.DS_Store
