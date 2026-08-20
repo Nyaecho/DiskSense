@@ -192,3 +192,65 @@ class TestDashboardAndWs:
         r = client.get("/shutdown")
         assert r.status_code == 200
         assert r.json()["status"] == "shutting_down"
+
+
+class TestFieldReportFixes:
+    """回合自 OpenCode 侧真实使用报告的三个 bug（多会话取错/盘符正则无组/裸盘符）。"""
+
+    def test_detail_serves_latest_completed_session(self, client, tree, tmp_path):
+        """/detail 与仪表盘必须服务「最新」完成会话，而非字典序首个。"""
+        _scan(client, tree)  # 第一次：google/wechat
+
+        b = tmp_path / "b"
+        (b / "Program Files" / "Steam").mkdir(parents=True)
+        (b / "Program Files" / "Steam" / "steam.exe").write_bytes(b"MZ" + b"\x00" * 30)
+        body_b = _scan(client, b)  # 第二次：仅 steam
+
+        # 确保时间戳严格递增（防 Windows 时钟粒度导致的并列）
+        st = client.app.state.disk_sense
+        st.sessions[body_b["session_id"]].started_at += 1.0
+
+        r = client.get("/detail", params={"entity_id": "steam", "category": "program_base"})
+        assert r.status_code == 200  # 修复前：旧会话挡路 → 404
+        r = client.get("/detail", params={"entity_id": "google", "category": "program_base"})
+        assert r.status_code == 404  # 旧会话实体不再由 /detail 服务
+
+    def test_bare_drive_session_scope(self, client, tmp_path):
+        """盘符形式会话的 roots 键为 "C:"；/operation 不再 500（正则缺组）且放行同盘文件。"""
+        import os
+
+        from disk_sense.aggregator import Aggregator
+        from disk_sense.server import ScanSession
+
+        f = tmp_path / "ok.txt"
+        f.write_text("x")
+        dest = tmp_path / "d"
+        dest.mkdir()
+        drive = os.path.splitdrive(str(f))[0]  # tmp 所在盘（本机为 C:）
+
+        st = client.app.state.disk_sense
+        s = ScanSession(session_id="manual-drive", target=drive)
+        s.status = "completed"
+        s.aggregator = Aggregator()
+        st.sessions["manual-drive"] = s
+        s2 = ScanSession(session_id="manual-drive-slash", target=drive + "/")
+        s2.status = "completed"
+        s2.aggregator = Aggregator()
+        s2.started_at = s.started_at - 1
+        st.sessions["manual-drive-slash"] = s2
+
+        assert st.scanned_roots() == {drive}  # "C:" 与 "C:/" 归一为同一键
+
+        # 修复前：scanned_roots 的 m.group(1) 抛 IndexError → 500
+        r = client.post(
+            "/operation", json={"op_type": "copy", "sources": [str(f)], "dest": str(dest)}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "completed"
+
+        # 未扫描盘符仍被范围防线拒绝
+        r = client.post(
+            "/operation", json={"op_type": "copy", "sources": ["Q:/x.txt"], "dest": str(dest)}
+        )
+        assert r.status_code == 400
+        assert "未经扫描" in r.json()["detail"]

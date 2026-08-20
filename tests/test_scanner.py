@@ -116,3 +116,20 @@ def test_junction_not_traversed(tmp_path):
 def test_get_drive_type_system_drive():
     assert scanner.get_drive_type("C:\\") == 3  # 系统盘必为本地硬盘
     assert scanner.get_drive_type("D:\\adobe\\nonexistent\\") == 0  # 非盘符
+
+
+class TestNormalizeTarget:
+    """裸盘符归一化（Windows 陷阱：abspath("C:") 指向 C 盘的 CWD 而非盘根）。"""
+
+    @pytest.mark.parametrize("raw,expect", [
+        ("C:", "C:\\"),
+        ("c:", "C:\\"),
+        ("C:\\", "C:\\"),
+        ("C:/", "C:\\"),
+        ("C:\\\\", "C:\\"),
+        (r"D:\dir", r"D:\dir"),
+        ("D:/dir/x", "D:/dir/x"),
+        ("relative/path", "relative/path"),
+    ])
+    def test_normalize(self, raw, expect):
+        assert scanner._normalize_target(raw) == expect

@@ -61,7 +61,10 @@ from .undo_manager import UndoManager
 
 logger = logging.getLogger(__name__)
 
-_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]*$")
+# 必须带捕获组且含冒号：scanned_roots/_source_in_scope 的范围键统一为 "C:" 形式
+# （无组会使 m.group(1) 抛 IndexError → 所有 /operation 500；缺冒号则与
+# _source_in_scope 的键格式不匹配 → 永远校验失败）
+_DRIVE_RE = re.compile(r"^([A-Za-z]:)[\\/]*$")
 VALID_VIZ_ACTIONS = {"highlight", "label", "group", "protect", "clear"}
 VALID_OP_TYPES = {"move", "copy", "delete", "compress"}
 
@@ -170,6 +173,19 @@ class AppState:
         if not self.sessions:
             return None
         return max(self.sessions.values(), key=lambda s: s.started_at)
+
+    def latest_completed_session(self) -> Optional[ScanSession]:
+        """最近一次已完成的会话（/detail 与仪表盘数据源）。
+
+        取 started_at 最新而非字典序首个——旧空会话（如误扫技能目录）
+        会永久挡住后续正确扫描的结果查询。
+        """
+        completed = [
+            s
+            for s in self.sessions.values()
+            if s.status == "completed" and s.aggregator is not None
+        ]
+        return max(completed, key=lambda s: s.started_at, default=None)
 
     def scanned_roots(self) -> set[str]:
         """操作范围键集合（方案书 §15）：完整盘符扫描给盘根键，目录扫描给前缀键。"""
@@ -470,9 +486,7 @@ def create_app(
     async def detail(
         entity_id: str = Query(...), category: Optional[str] = Query(None)
     ):
-        latest = next(
-            (s for s in state.sessions.values() if s.status == "completed"), None
-        )
+        latest = state.latest_completed_session()
         if latest is None or latest.aggregator is None:
             raise HTTPException(404, "尚无已完成的扫描会话")
         top = latest.aggregator.entity_top_files.get(entity_id)
@@ -541,9 +555,7 @@ def create_app(
     # ---------------- / （仪表盘）----------------
     @app.get("/", response_class=HTMLResponse)
     async def dashboard():
-        latest = next(
-            (s for s in state.sessions.values() if s.status == "completed"), None
-        )
+        latest = state.latest_completed_session()
         data = latest.fingerprint if latest else None
         return HTMLResponse(render_dashboard_html(data))
 

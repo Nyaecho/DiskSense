@@ -46,6 +46,19 @@ def get_drive_type(target: str) -> int:
     return int(ctypes.windll.kernel32.GetDriveTypeW(f"{m.group(1)}:\\"))
 
 
+def _normalize_target(target: str) -> str:
+    """裸盘符归一化："C:" / "c:/" → "C:\\"。
+
+    Windows 下 ``os.path.abspath("C:")`` 解析为「C 盘的当前工作目录」
+    （即服务启动目录）而非盘根——walk 降级模式下会把裸盘符扫成启动目录
+    的一个小角落。归一化为带分隔符的盘根后 abspath 才指向真正的盘根。
+    """
+    m = _DRIVE_RE.match(target.strip())
+    if m:
+        return f"{m.group(1).upper()}:\\"
+    return target
+
+
 def _is_link(entry: os.DirEntry) -> bool:
     """判断目录项是否为 Junction/符号链接（基于 st_reparse_tag，无需管理员）。"""
     try:
@@ -256,7 +269,8 @@ def scan(
     主动探测盘符类型（方案书 §6.2），避免"先报错再降级"。
     """
     cfg = cfg or ScanConfig()
-    m = _DRIVE_RE.match(target.strip())
+    target = _normalize_target(target)
+    m = _DRIVE_RE.match(target)
 
     if (
         m
