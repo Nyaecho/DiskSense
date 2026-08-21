@@ -14,7 +14,7 @@ DiskSense/
 ├── SKILL.md                   # Agent Skill 提示词定义（交付物）
 ├── scripts/                   # Agent 胶水脚本（launcher / api_client）
 ├── disk_sense/                # 核心引擎 Python 包
-│   ├── server.py              # FastAPI 服务（HTTP + WebSocket）
+│   ├── server.py              # FastAPI 服务（HTTP API）
 │   ├── scanner.py             # 扫描调度（MFT 优先 / os.walk 降级）
 │   ├── mft.py                 # NTFS MFT 解析器
 │   ├── aggregator.py          # 指纹聚合器
@@ -22,9 +22,7 @@ DiskSense/
 │   ├── rules_engine.py        # 结构化规则安全评估器
 │   ├── file_operator.py       # 文件操作（回收站 / $I$R 映射）
 │   ├── undo_manager.py        # SQLite 操作日志与五步回滚
-│   ├── preferences.py         # 用户偏好（原子写入 + filelock）
-│   ├── report.py              # HTML 报告渲染
-│   └── templates/             # 仪表盘模板与前端资源
+│   └── preferences.py         # 用户偏好（原子写入 + filelock）
 ├── config/                    # YAML 配置（服务 / 规则）
 ├── tests/                     # pytest 测试（与模块一一对应）
 ├── Data/                      # 运行时生成（gitignore，删除即卸载）

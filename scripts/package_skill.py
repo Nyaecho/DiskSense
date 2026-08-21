@@ -12,7 +12,7 @@ cc-switch 的 install_from_zip 逻辑（src/services/skill.rs）：
     └── disk-sense-manager/
         ├── SKILL.md
         ├── scripts/            # launcher.py / api_client.py
-        ├── disk_sense/         # 核心引擎（含 templates/vendor/d3）
+        ├── disk_sense/         # 核心引擎
         ├── config/
         ├── requirements.txt
         ├── README.md
@@ -96,7 +96,6 @@ def build_zip(out_path: Path) -> Path:
         names = zf.namelist()
         skill_mds = [n for n in names if n.endswith("SKILL.md")]
         assert skill_mds == [f"{SKILL_NAME}/SKILL.md"], f"SKILL.md 布局异常: {skill_mds}"
-        assert f"{SKILL_NAME}/disk_sense/templates/vendor/d3.min.js" in names, "D3 vendor 缺失"
         assert f"{SKILL_NAME}/scripts/api_client.py" in names
         assert f"{SKILL_NAME}/config/config.yaml" in names
 

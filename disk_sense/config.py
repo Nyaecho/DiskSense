@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "Data"
-REPORTS_DIR = DATA_DIR / "reports"
 ARCHIVE_DIR = DATA_DIR / "archive"
-TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
@@ -40,7 +38,6 @@ DEFAULT_HOST = "127.0.0.1"
 def ensure_data_dirs() -> None:
     """创建 Data 目录树（幂等）。首次启动时调用。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -80,23 +77,12 @@ class HistoryConfig:
 
 
 @dataclass
-class ReportConfig:
-    max_entities: int = 200
-    anomaly_min_mb: int = 200
-    anomaly_root_min_mb: int = 50
-    max_anomalies: int = 50
-    treemap_depth: int = 3
-    treemap_children: int = 10
-
-
-@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     scan: ScanConfig = field(default_factory=ScanConfig)
     scan_api: ScanApiConfig = field(default_factory=ScanApiConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
-    report: ReportConfig = field(default_factory=ReportConfig)
 
 
 def _apply(dataclass_obj: Any, overrides: Any) -> None:
@@ -134,7 +120,6 @@ def load_config(path: Path | str | None = None) -> Config:
     _apply(cfg.scan_api, raw.get("scan_api"))
     _apply(cfg.idle, raw.get("idle"))
     _apply(cfg.history, raw.get("history"))
-    _apply(cfg.report, raw.get("report"))
     return cfg
 
 

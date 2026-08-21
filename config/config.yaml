@@ -22,11 +22,3 @@ idle:
 
 history:
   retention_days: 30            # SQLite 操作日志保留天数，超期归档至 Data/archive/
-
-report:
-  max_entities: 200             # 指纹档案实体数上限（Token 优化）
-  anomaly_min_mb: 200           # 未归类文件进入 global_anomalies 的体积门槛
-  anomaly_root_min_mb: 50       # 盘符根目录散落文件的更低门槛
-  max_anomalies: 50             # global_anomalies 条目上限
-  treemap_depth: 3              # 仪表盘 Treemap 最大深度
-  treemap_children: 10          # Treemap 每层最多展示的子节点数（其余合并为「其他」）

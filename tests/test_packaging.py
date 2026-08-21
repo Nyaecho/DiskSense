@@ -54,8 +54,6 @@ class TestPackage:
             "disk-sense-manager/scripts/api_client.py",
             "disk-sense-manager/scripts/launcher.py",
             "disk-sense-manager/disk_sense/server.py",
-            "disk-sense-manager/disk_sense/templates/template.html",
-            "disk-sense-manager/disk_sense/templates/vendor/d3.min.js",  # 离线仪表盘
             "disk-sense-manager/config/config.yaml",
             "disk-sense-manager/config/classification_rules.yaml",
         ):

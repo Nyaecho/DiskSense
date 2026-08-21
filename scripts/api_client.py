@@ -38,8 +38,10 @@ LAUNCHER = os.path.join(PROJECT_ROOT, "scripts", "launcher.py")
 
 TOOLS = [
     "status", "start_scan", "query_detail", "classify_unknown",
-    "viz_command", "execute_operation", "list_recent_ops",
+    "viz_command", "query_overlays", "execute_operation", "list_recent_ops",
     "undo_operation", "add_protection", "remove_protection", "apply_tag",
+    "dir_stat", "search_dirs", "path_size", "subtree",
+    "query_job", "rescan", "recycle_bin_status", "empty_recycle_bin",
 ]
 
 
@@ -121,6 +123,17 @@ def main() -> int:
     parser.add_argument("--op_id", type=int)
     parser.add_argument("--tag", type=str)
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--pattern", type=str)
+    parser.add_argument("--root", type=str)
+    parser.add_argument("--top", type=int, default=50)
+    parser.add_argument("--depth", type=int, default=1)
+    parser.add_argument("--async", dest="async_mode", action="store_true",
+                        help="操作异步执行，立即返回 job_id")
+    parser.add_argument("--job_id", type=str)
+    parser.add_argument("--op_uuid", type=str)
+    parser.add_argument("--since_seq", type=int, default=0)
+    parser.add_argument("--wait", action="store_true",
+                        help="query_job 轮询直到任务结束")
     args = parser.parse_args()
 
     def jload(s):
@@ -160,12 +173,56 @@ def main() -> int:
             "target": jload(args.target) or {},
             "payload": jload(args.payload) or {},
         })
+    elif args.tool == "query_overlays":
+        result = call_api("overlays", "GET", params={"since_seq": args.since_seq or 0})
     elif args.tool == "execute_operation":
         result = call_api("operation", data={
             "op_type": args.op_type,
             "sources": jload(args.sources) or [],
             "dest": args.dest,
+            "async_mode": args.async_mode,
         }, timeout=args.timeout)
+        # 异步模式 + --wait：轮询直到任务结束
+        if args.async_mode and args.wait and isinstance(result, dict) and result.get("job_id"):
+            job_id = result["job_id"]
+            started = time.time()
+            while time.time() - started < args.timeout:
+                time.sleep(1)
+                poll = call_api("job", "GET", params={"job_id": job_id}, timeout=10)
+                if poll.get("status") in ("succeeded", "failed", "interrupted"):
+                    result = poll
+                    break
+            else:
+                result = {"status": "timeout", "job_id": job_id,
+                          "message": "任务仍在执行，稍后可用 query_job 查询"}
+    elif args.tool == "query_job":
+        if not args.job_id:
+            result = {"status": "error", "error": "缺少 --job_id 参数"}
+        elif args.wait:
+            started = time.time()
+            result = None
+            while time.time() - started < args.timeout:
+                result = call_api("job", "GET", params={"job_id": args.job_id}, timeout=10)
+                if result.get("status") in ("succeeded", "failed", "interrupted"):
+                    break
+                time.sleep(1)
+            if result is None or result.get("status") not in ("succeeded", "failed", "interrupted"):
+                result = {"status": "timeout", "job_id": args.job_id,
+                          "message": "任务仍在执行，稍后可再次查询"}
+        else:
+            result = call_api("job", "GET", params={"job_id": args.job_id})
+    elif args.tool == "rescan":
+        if not args.path:
+            result = {"status": "error", "error": "缺少 --path 参数"}
+        else:
+            result = call_api("rescan", params={"path": args.path}, timeout=args.timeout)
+    elif args.tool == "recycle_bin_status":
+        result = call_api("recycle_bin_status", "GET")
+    elif args.tool == "empty_recycle_bin":
+        if not args.op_uuid:
+            result = {"status": "error", "error": "缺少 --op_uuid 参数（仅清空指定操作产生的条目，不支持全清）"}
+        else:
+            result = call_api("recycle_bin/empty", data={"op_uuid": args.op_uuid})
     elif args.tool == "list_recent_ops":
         result = call_api("history", "GET", params={"limit": args.limit})
     elif args.tool == "undo_operation":
@@ -176,6 +233,30 @@ def main() -> int:
         result = call_api("protect", data={"path": args.path, "add": False})
     elif args.tool == "apply_tag":
         result = call_api("tag", data={"path": args.path, "tag": args.tag})
+    elif args.tool == "dir_stat":
+        if not args.path:
+            result = {"status": "error", "error": "缺少 --path 参数"}
+        else:
+            result = call_api("dir_stat", "GET", params={"path": args.path})
+    elif args.tool == "search_dirs":
+        if not args.pattern or not args.root:
+            result = {"status": "error", "error": "缺少 --pattern 或 --root 参数"}
+        else:
+            result = call_api("search_dirs", "GET", params={
+                "pattern": args.pattern, "root": args.root, "top": args.top,
+            }, timeout=args.timeout)
+    elif args.tool == "path_size":
+        if not args.path:
+            result = {"status": "error", "error": "缺少 --path 参数"}
+        else:
+            result = call_api("path_size", "GET", params={"path": args.path}, timeout=args.timeout)
+    elif args.tool == "subtree":
+        if not args.path:
+            result = {"status": "error", "error": "缺少 --path 参数"}
+        else:
+            result = call_api("subtree", "GET", params={
+                "path": args.path, "depth": args.depth,
+            }, timeout=args.timeout)
     else:  # pragma: no cover
         result = {"status": "error", "error": f"未知工具: {args.tool}"}
 

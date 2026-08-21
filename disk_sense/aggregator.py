@@ -13,7 +13,7 @@
 4. 未归类的大文件进入 global_anomalies，批量完成魔数识别，
    Agent 无需逐个查询。
 
-附加（超出方案书、服务于仪表盘与 /detail）：
+附加（超出方案书、服务于 treemap 数据与 /detail）：
 - treemap 树形数据；
 - 每实体每角色的 Top5 文件（供 query_detail，不进入 JSON）；
 - 「系统临时文件」伪实体（AppData\\Local\\Temp 与 Windows\\Temp 的
@@ -29,13 +29,24 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import magic
-from .config import ReportConfig
 from .models import Node, ScanResult
 from .rules_engine import RulesEngine
 
 logger = logging.getLogger(__name__)
 
 MB = 1024 * 1024
+
+
+@dataclass
+class _AggregateDefaults:
+    """聚合阈值默认值。"""
+
+    max_entities: int = 200
+    anomaly_min_mb: int = 200
+    anomaly_root_min_mb: int = 50
+    max_anomalies: int = 50
+    treemap_depth: int = 3
+    treemap_children: int = 10
 
 ROLE_PROGRAM = "program_base"
 ROLE_USER = "user_data"
@@ -96,6 +107,7 @@ class _Entity:
     newest_activity: float = 0.0
     ext_bytes: dict = field(default_factory=dict)  # ext → bytes
     tags: set = field(default_factory=set)
+    kind: str = "known"  # known（已知软件实体）| pseudo（目录级伪实体）
 
     @property
     def total_bytes(self) -> int:
@@ -107,17 +119,20 @@ class Aggregator:
 
     def __init__(
         self,
-        cfg: Optional[ReportConfig] = None,
+        cfg: Optional[object] = None,
         rules: Optional[RulesEngine] = None,
         tags_by_prefix: Optional[dict[str, str]] = None,
         now: Optional[float] = None,
         magic_classifier=None,
+        pseudo_entity_paths: Optional[list[str]] = None,
     ):
         """Args:
             magic_classifier: 魔数分类函数（默认 magic.classify_magic_number，
                 注入接缝仅为测试，不影响生产行为）。
+            pseudo_entity_paths: 用户标记的伪实体根路径（偏好
+                pseudo_entity_paths）；扫描时这些路径优先生成伪实体。
         """
-        self.cfg = cfg or ReportConfig()
+        self.cfg = cfg or _AggregateDefaults()
         self.rules = rules or RulesEngine()
         self.tags_by_prefix = {
             k.lower().replace("/", "\\").rstrip("\\"): v for k, v in (tags_by_prefix or {}).items()
@@ -128,6 +143,12 @@ class Aggregator:
         # 供 /detail 使用（不进指纹 JSON）
         self.entity_top_files: dict[str, dict[str, list[dict]]] = {}
         self._unassigned_bytes = 0
+        # 缓存目录模式库命中项（cache-detection）：整棵子树归入缓存桶
+        self.cache_dirs: list[dict] = []
+        # 伪实体标记路径（小写、反斜杠、去尾分隔符）
+        self.pseudo_entity_paths = [
+            p.lower().replace("/", "\\").rstrip("\\") for p in (pseudo_entity_paths or [])
+        ]
 
     # ------------------------------------------------------------------
     def aggregate(self, result: ScanResult, session_id: str) -> dict:
@@ -149,6 +170,17 @@ class Aggregator:
         ordered = sorted(entities.values(), key=lambda e: e.total_bytes, reverse=True)
         truncated = max(0, len(ordered) - self.cfg.max_entities)
         ordered = ordered[: self.cfg.max_entities]
+
+        # --- 伪实体降级（pseudo-entities）：无已知实体时按顶层目录切分 ---
+        pseudo_generated = False
+        if not ordered:
+            for pe in self._generate_pseudo_entities(root):
+                if pe.id not in entities:
+                    entities[pe.id] = pe
+            ordered = sorted(entities.values(), key=lambda e: e.total_bytes, reverse=True)[
+                : self.cfg.max_entities
+            ]
+            pseudo_generated = True
 
         # --- global_anomalies：未归类大文件，批量魔数识别 ---
         anomalies.sort(key=lambda a: a[1], reverse=True)
@@ -172,6 +204,18 @@ class Aggregator:
             "drive": root.name,
             "entities": entity_dicts,
             "global_anomalies": global_anomalies,
+            "cache_dirs": [
+                {
+                    "path": c["path"],
+                    "cache_type": c["cache_type"],
+                    "size_mb": _mb(c["size"]),
+                    "mtime": c["mtime"],
+                    "signal": f"CACHE_DOMINANT:{c['cache_type']}",
+                }
+                for c in sorted(self.cache_dirs, key=lambda c: c["size"], reverse=True)[
+                    : self.cfg.max_entities
+                ]
+            ],
             "summary": {
                 "total_scanned_mb": _mb(result.total_bytes),
                 "files": result.files,
@@ -182,11 +226,73 @@ class Aggregator:
                 "scan_mode": result.mode,
                 "entities_count": len(entity_dicts),
                 "entities_truncated": truncated,
+                "cache_dirs_count": len(self.cache_dirs),
             },
             "signals_legend": {r.signal: r.description for r in self.rules.rules},
             "treemap": self._build_treemap(root, ordered),
         }
+        if pseudo_generated:
+            fingerprint["pseudo_entities"] = True
         return fingerprint
+
+    # ------------------------------------------------------------------
+    def _generate_pseudo_entities(self, root: Node) -> list[_Entity]:
+        """目录级伪实体：用户标记路径优先，否则按顶层目录切分。
+
+        每个伪实体携带路径/体积/文件数/mtime 聚合元数据，kind="pseudo"，
+        与已知实体共用同一分析接口语义（query_detail 等）。
+        """
+        pseudo: list[_Entity] = []
+
+        def make_entity(name: str, path: str, node: Node) -> _Entity:
+            e = _Entity(id=f"pseudo:{path.lower()}", display=name, kind="pseudo")
+            e.locs[ROLE_USER].bytes = node.size
+            # 文件数/时间从子树相略聚合（文件数仅顶层可见时降级为目录计数）
+            files = 0
+            newest = node.mtime
+            stack = [node]
+            while stack:
+                n = stack.pop()
+                for c in (n.children or {}).values():
+                    if c.is_dir:
+                        stack.append(c)
+                    else:
+                        files += 1
+                    if c.mtime > newest:
+                        newest = c.mtime
+            e.locs[ROLE_USER].files = files
+            e.newest_activity = newest
+            e.ext_bytes[""] = node.size  # 目录级聚合无扩展名细分
+            return e
+
+        # 用户标记路径优先
+        root_low = root.name.lower()
+        for marked in self.pseudo_entity_paths:
+            # 标记路径须在扫描根之下（范围外静默跳过）
+            if not marked.startswith(root_low + "\\") and marked != root_low:
+                continue
+            rest = marked[len(root.name) :].strip("\\")
+            node = root
+            ok = True
+            for seg in rest.split("\\") if rest else []:
+                nxt = (node.children or {}).get(seg) or next(
+                    (c for k, c in (node.children or {}).items() if k.lower() == seg.lower()), None
+                )
+                if nxt is None:
+                    ok = False
+                    break
+                node = nxt
+            if ok and node.size > 0:
+                pseudo.append(make_entity(node.name, marked, node))
+        if pseudo:
+            return pseudo
+
+        # 无标记：按顶层目录切分（跳过缓存目录与零体积目录）
+        for name, child in (root.children or {}).items():
+            if child.size <= 0 or not child.is_dir or child.cache_type:
+                continue
+            pseudo.append(make_entity(name, f"{root.name}\\{name}", child))
+        return pseudo
 
     # ------------------------------------------------------------------
     def _collect_seeds(self, root: Node) -> None:
@@ -311,6 +417,20 @@ class Aggregator:
             cparts_low = parts_low + [name.lower()]
             path = "\\".join(cparts)
 
+            # 缓存目录模式库命中：整棵子树归入缓存桶，不再下钻归类
+            # （其体积不进入未归类，也不参与实体种子匹配）
+            if child.is_dir and child.cache_type:
+                self.cache_dirs.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "size": child.size,
+                        "mtime": child.mtime,
+                        "cache_type": child.cache_type,
+                    }
+                )
+                continue
+
             if child.is_dir and child.children:
                 self._walk(child, cparts, cparts_low, entities, anomalies)
                 continue
@@ -363,6 +483,7 @@ class Aggregator:
         d = {
             "id": e.id,
             "display": e.display,
+            "kind": e.kind,
             "total_size_mb": _mb(total),
             "locations": {
                 r: {
@@ -405,7 +526,7 @@ class Aggregator:
 
     # ------------------------------------------------------------------
     def _build_treemap(self, root: Node, ordered: list[_Entity]) -> dict:
-        """实体树 + 非覆盖根目录 → 仪表盘 Treemap 数据（含实体 id 供高亮）。"""
+        """实体树 + 非覆盖根目录 → Treemap 层级数据（含实体 id 供高亮）。"""
         children: list[dict] = []
         for e in ordered:
             role_children = [
@@ -427,8 +548,11 @@ class Aggregator:
             )
 
         covered = {"program files", "program files (x86)", "users", "programdata"}
+        cache_paths = {c["path"].lower() for c in self.cache_dirs}
         rest_dirs = [
-            c for n, c in (root.children or {}).items() if n.lower() not in covered and c.size > 0
+            c
+            for n, c in (root.children or {}).items()
+            if n.lower() not in covered and c.size > 0 and "\\".join([root.name, n]).lower() not in cache_paths
         ]
         rest_dirs.sort(key=lambda c: c.size, reverse=True)
         for d in rest_dirs[: self.cfg.treemap_children]:
@@ -446,8 +570,26 @@ class Aggregator:
                 }
             )
 
+        # 缓存目录（cache-detection）：带 CACHE_DOMINANT:<type> 信号，
+        # 不计入「未归类文件」
+        for c in sorted(self.cache_dirs, key=lambda c: c["size"], reverse=True)[
+            : self.cfg.treemap_children
+        ]:
+            children.append(
+                {
+                    "name": f"{c['name']}（{c['cache_type']} 缓存）",
+                    "id": f"cache:{c['cache_type']}:{c['path'].lower()}",
+                    "value": c["size"],
+                    "signal": f"CACHE_DOMINANT:{c['cache_type']}",
+                }
+            )
+
         if self._unassigned_bytes > 0:
             children.append(
                 {"name": "未归类文件", "id": "unassigned", "value": self._unassigned_bytes}
             )
+        elif self._unassigned_bytes < 0:
+            # 缓存目录冲抵后不应为负；防御性归零并告警
+            logger.warning("未归类字节出现负值（%d），已归零", self._unassigned_bytes)
+            self._unassigned_bytes = 0
         return {"name": root.name, "id": "root", "children": children}

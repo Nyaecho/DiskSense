@@ -6,7 +6,8 @@ import pytest
 
 from disk_sense import aggregator as agg
 from disk_sense.aggregator import Aggregator
-from disk_sense.config import ReportConfig, RULES_FILE
+from disk_sense.aggregator import _AggregateDefaults as ReportConfig
+from disk_sense.config import RULES_FILE
 from disk_sense.models import Node, ScanResult, finalize_tree
 from disk_sense.rules_engine import RulesEngine
 
@@ -273,3 +274,87 @@ class TestAggregate:
         _, fp = fingerprint
         text = json.dumps(fp, ensure_ascii=False)
         assert len(text) < 20_000
+
+    def test_cache_dirs_bucketed_not_unassigned(self):
+        """cache-detection：命中模式库的目录进缓存桶，不计未归类。"""
+        root = Node("E:", is_dir=True, children={})
+        pnpm = Node(".pnpm-store", is_dir=True, children={}, cache_type="pnpm")
+        pnpm.add_child(f("pkg.tgz", 100))
+        hf = Node("huggingface", is_dir=True, children={}, cache_type="huggingface")
+        hf.add_child(f("model.bin", 200))
+        normal = Node("data", is_dir=True, children={})
+        normal.add_child(f("a.dat", 50))
+        root.add_child(pnpm)
+        root.add_child(hf)
+        root.add_child(normal)
+
+        cfg = ReportConfig(anomaly_min_mb=10_000)
+        a = Aggregator(cfg=cfg, rules=RulesEngine(), now=NOW)
+        fp = a.aggregate(make_result(root), "s")
+
+        assert fp["summary"]["cache_dirs_count"] == 2
+        by_type = {c["cache_type"]: c for c in fp["cache_dirs"]}
+        assert by_type["pnpm"]["size_mb"] == pytest.approx(100, abs=1)
+        assert by_type["huggingface"]["size_mb"] == pytest.approx(200, abs=1)
+        assert by_type["pnpm"]["signal"] == "CACHE_DOMINANT:pnpm"
+        # treemap 中带缓存信号节点；未归类仅含普通目录文件（50MB），
+        # 不含缓存目录体积（300MB）
+        tm = {c["id"]: c for c in fp["treemap"]["children"]}
+        assert any(i.startswith("cache:pnpm:") for i in tm)
+        assert tm["unassigned"]["value"] == pytest.approx(50 * agg.MB)
+        # 缓存目录不进入实体；伪实体仅含普通目录（不含缓存目录）
+        ids = {e["id"] for e in fp["entities"]}
+        assert ids == {"pseudo:e:\\data"}
+
+    def test_pseudo_entities_when_no_known(self):
+        """无已知实体时按顶层目录生成伪实体（kind=pseudo）。"""
+        root = Node("E:", is_dir=True, children={})
+        d1 = Node("datasets", is_dir=True, children={})
+        d1.add_child(f("a.bin", 300))
+        d2 = Node("backups", is_dir=True, children={})
+        d2.add_child(f("b.zip", 100))
+        root.add_child(d1)
+        root.add_child(d2)
+
+        cfg = ReportConfig(anomaly_min_mb=10_000)
+        a = Aggregator(cfg=cfg, rules=RulesEngine(), now=NOW)
+        fp = a.aggregate(make_result(root), "s")
+
+        assert fp.get("pseudo_entities") is True
+        ids = {e["id"] for e in fp["entities"]}
+        assert ids == {"pseudo:e:\\datasets", "pseudo:e:\\backups"}
+        ds = next(e for e in fp["entities"] if e["id"].endswith("datasets"))
+        assert ds["kind"] == "pseudo"
+        assert ds["total_size_mb"] == pytest.approx(300, abs=1)
+        assert ds["locations"]["user_data"]["file_count"] == 1
+
+    def test_no_pseudo_when_entities_exist(self, fingerprint):
+        """有已知实体时不生成伪实体。"""
+        _, fp = fingerprint
+        assert "pseudo_entities" not in fp
+        assert all(e.get("kind", "known") == "known" for e in fp["entities"])
+
+    def test_pseudo_marked_paths_priority(self):
+        """用户标记路径优先于顶层切分；范围外静默跳过。"""
+        root = Node("E:", is_dir=True, children={})
+        d1 = Node("datasets", is_dir=True, children={})
+        sub = Node("ml", is_dir=True, children={})
+        sub.add_child(f("model.bin", 500))
+        d1.add_child(sub)
+        d1.add_child(f("misc.dat", 10))
+        root.add_child(d1)
+
+        cfg = ReportConfig(anomaly_min_mb=10_000)
+        a = Aggregator(
+            cfg=cfg,
+            rules=RulesEngine(),
+            now=NOW,
+            pseudo_entity_paths=["e:/datasets/ml", "D:/elsewhere"],
+        )
+        fp = a.aggregate(make_result(root), "s")
+
+        ids = {e["id"] for e in fp["entities"]}
+        # 仅命中标记路径（范围外 D:/ 被跳过），不再顶层切分
+        assert ids == {"pseudo:e:\\datasets\\ml"}
+        ml = fp["entities"][0]
+        assert ml["total_size_mb"] == pytest.approx(500, abs=1)

@@ -4,7 +4,6 @@ from pathlib import Path
 
 from disk_sense.config import (
     Config,
-    REPORTS_DIR,
     RULES_FILE,
     ensure_data_dirs,
     load_config,
@@ -20,7 +19,7 @@ def test_defaults_when_file_missing(tmp_path: Path):
     assert cfg.scan.max_workers is None
     assert cfg.scan.throttle_every == 1000
     assert cfg.idle.shutdown_timeout_sec == 300
-    assert cfg.report.max_entities == 200
+    assert not hasattr(cfg, "report")  # report 配置段已不存在
 
 
 def test_load_repo_default_config():
@@ -57,10 +56,9 @@ def test_ensure_data_dirs_idempotent(tmp_path: Path, monkeypatch):
 
     # 把 Data 目录重定向到临时目录，避免污染仓库
     monkeypatch.setattr(c, "DATA_DIR", tmp_path / "Data")
-    monkeypatch.setattr(c, "REPORTS_DIR", tmp_path / "Data" / "reports")
     monkeypatch.setattr(c, "ARCHIVE_DIR", tmp_path / "Data" / "archive")
     c.ensure_data_dirs()
-    assert (tmp_path / "Data" / "reports").is_dir()
+    assert (tmp_path / "Data").is_dir()
     assert (tmp_path / "Data" / "archive").is_dir()
     c.ensure_data_dirs()  # 幂等
 

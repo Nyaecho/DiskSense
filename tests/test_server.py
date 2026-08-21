@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -75,8 +76,8 @@ class TestCoreEndpoints:
         r = client.get("/detail", params={"entity_id": "wechat", "category": "bogus"})
         assert r.status_code == 400
 
-        # 报告文件落盘
-        assert os.path.exists(body["report_path"])
+        # 响应不含 report_path
+        assert "report_path" not in body
 
     def test_classify(self, client, tree):
         f = tree / "pic.png"
@@ -94,10 +95,15 @@ class TestCoreEndpoints:
                   "payload": {"color": "#FF4500", "label": "卸载残留"}},
         )
         assert r.status_code == 200 and r.json()["status"] == "ok"
-        # /poll 降级通道能取到叠加层指令
-        r = client.get("/poll", params={"since": 0})
+        seq = r.json()["seq"]
+        # /overlays 轮询能取回叠加层指令增量
+        r = client.get("/overlays", params={"since_seq": 0})
         overlays = r.json()["overlays"]
         assert overlays and overlays[-1]["action"] == "highlight"
+        assert overlays[-1]["seq"] == seq
+        # 增量语义：since_seq=seq 之后无新指令
+        r = client.get("/overlays", params={"since_seq": seq})
+        assert r.json()["overlays"] == []
         # 无效动作
         r = client.post("/viz", json={"action": "explode", "target": {}, "payload": {}})
         assert r.status_code == 400
@@ -157,36 +163,256 @@ class TestOperations:
         assert r.json()["status"] == "tagged"
 
 
-class TestDashboardAndWs:
-    def test_dashboard_html(self, client, tree):
-        _scan(client, tree)
-        r = client.get("/")
+class TestMetadataQuery:
+    """只读元数据端点：dir_stat / search_dirs / path_size（无需扫描会话）。"""
+
+    def test_dir_stat_returns_timestamps(self, client, tree):
+        r = client.get("/dir_stat", params={"path": str(tree / "Users" / "tom")})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["is_dir"] is True
+        for key in ("mtime", "atime", "ctime"):
+            assert isinstance(body[key], float)
+
+    def test_dir_stat_not_found(self, client, tree):
+        r = client.get("/dir_stat", params={"path": str(tree / "ghost")})
+        assert r.status_code == 404
+
+    def test_dir_stat_works_without_scan(self, client, tree):
+        # 未扫描路径也可查（只读无范围校验）
+        r = client.get("/dir_stat", params={"path": str(tree / "readme.txt")})
         assert r.status_code == 200
-        assert "text/html" in r.headers["content-type"]
+        assert r.json()["size"] > 0
 
-    def test_ws_ping_snapshot_and_operation(self, client, tree):
+    def test_search_dirs_matches_dirs_and_files(self, client, tree):
+        r = client.get(
+            "/search_dirs",
+            params={"pattern": "*cache*", "root": str(tree)},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert any(d["path"].endswith("Cache") for d in body["dirs"])
+        assert body["files"] == []  # 无匹配文件
+
+    def test_search_dirs_matches_files(self, client, tree):
+        r = client.get(
+            "/search_dirs",
+            params={"pattern": "*.exe", "root": str(tree)},
+        )
+        body = r.json()
+        assert any(f["path"].endswith("chrome.exe") for f in body["files"])
+        assert body["dirs"] == []
+
+    def test_search_dirs_top_limit(self, client, tree):
+        r = client.get(
+            "/search_dirs",
+            params={"pattern": "*", "root": str(tree), "top": 1},
+        )
+        body = r.json()
+        assert len(body["files"]) <= 1
+        assert body["total_files_matched"] >= 1
+
+    def test_search_dirs_respects_ignore_patterns(self, client, tree):
+        # 用户偏好忽略模式：命中目录不匹配也不下钻
+        # （服务端启动时已加载偏好到内存，须通过同一对象修改）
+        client.app.state.disk_sense.prefs.add_ignore_pattern("google")
+        r = client.get(
+            "/search_dirs",
+            params={"pattern": "goo*", "root": str(tree)},
+        )
+        body = r.json()
+        assert body["dirs"] == []  # Google 目录被忽略
+
+    def test_search_dirs_root_not_found(self, client, tree):
+        r = client.get(
+            "/search_dirs",
+            params={"pattern": "*", "root": str(tree / "ghost")},
+        )
+        assert r.status_code == 404
+
+    def test_path_size_measures_tree(self, client, tree):
+        r = client.get("/path_size", params={"path": str(tree / "Program Files")})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["files"] == 2  # chrome.exe/chrome.dll
+        assert body["dirs"] == 1  # Google
+        assert body["total_bytes"] == 32 + 1000  # MZ + 30 字节 + chrome.dll
+
+    def test_path_size_single_file(self, client, tree):
+        r = client.get("/path_size", params={"path": str(tree / "readme.txt")})
+        body = r.json()
+        assert body["files"] == 1
+        assert body["dirs"] == 0
+        assert body["total_bytes"] == len("说明".encode("utf-8"))
+
+    def test_path_size_not_found(self, client, tree):
+        r = client.get("/path_size", params={"path": str(tree / "ghost")})
+        assert r.status_code == 404
+
+    def test_pseudo_entities_flow(self, client, tmp_path):
+        """纯数据盘扫描 → 伪实体生成且 /detail 可查询。"""
+        data = tmp_path / "pure_data"
+        (data / "datasets").mkdir(parents=True)
+        (data / "datasets" / "a.bin").write_bytes(b"x" * 500)
+        (data / "movies").mkdir()
+        (data / "movies" / "m.mkv").write_bytes(b"y" * 200)
+
+        body = _scan(client, data)
+        fp = body["result"]
+        assert fp.get("pseudo_entities") is True
+        ids = {e["id"] for e in fp["entities"]}
+        assert "pseudo:pure_data\\datasets" in ids and "pseudo:pure_data\\movies" in ids
+        # /detail 对伪实体正常返回（不因 kind 拒绝）
+        r = client.get("/detail", params={"entity_id": "pseudo:pure_data\\datasets"})
+        assert r.status_code == 200
+
+    def test_subtree_drilldown(self, client, tree):
+        """subtree：下钻、深度上限、范围外 404。"""
         _scan(client, tree)
-        with client.websocket_connect("/ws") as ws:
-            # 已有会话 → 首条是 snapshot
-            snapshot = ws.receive_json()
-            assert snapshot["type"] == "snapshot"
-            assert snapshot["status"] == "completed"
+        # 下钻一层：Program Files
+        r = client.get("/subtree", params={"path": str(tree / "Program Files"), "depth": 1})
+        assert r.status_code == 200
+        body = r.json()
+        names = {c["name"] for c in body["subtree"]["children"]}
+        assert "Google" in names
 
-            ws.send_json({"type": "ping"})
-            assert ws.receive_json()["type"] == "pong"
+        # 多层下钻
+        r = client.get("/subtree", params={"path": str(tree), "depth": 2})
+        assert r.status_code == 200
+        top = r.json()["subtree"]
+        assert top["is_dir"] is True and top["children"]
 
-            # 右键菜单走 WS 执行 copy 操作
-            src = tree / "readme.txt"
-            ws.send_json({
-                "type": "operation",
-                "op_type": "copy",
-                "sources": [str(src)],
-                "dest": str(tree / "Users" / "tom" / "AppData" / "Local"),
-            })
-            result = ws.receive_json()
-            assert result["type"] == "operation_result"
-            assert result["status"] == "completed"
-            assert (tree / "Users" / "tom" / "AppData" / "Local" / "readme.txt").exists()
+        # depth 超上限 → 422（Query le=5）
+        r = client.get("/subtree", params={"path": str(tree), "depth": 99})
+        assert r.status_code == 422
+
+        # 范围外路径 → 404
+        r = client.get("/subtree", params={"path": "W:\\nope", "depth": 1})
+        assert r.status_code == 404
+
+        # 无会话 → 404（新 client）
+        r2 = client.get("/subtree", params={"path": str(tree), "depth": 1})
+        assert r2.status_code == 200  # 已有会话
+
+    def test_async_operation_job_flow(self, client, tree):
+        """异步删除：202+job_id → 轮询 succeeded；审计/撤销等价。"""
+        import shutil as _sh
+
+        _scan(client, tree)
+        victim = tree / "Users" / "tom" / "AppData" / "Local" / "WeChat"
+        r = client.post("/operation", json={
+            "op_type": "delete",
+            "sources": [str(victim)],
+            "async_mode": True,
+        })
+        assert r.status_code == 202
+        body = r.json()
+        assert body["status"] == "accepted" and body["job_id"]
+
+        # 轮询直到完成
+        job_id = body["job_id"]
+        for _ in range(50):
+            jr = client.get("/job", params={"job_id": job_id})
+            assert jr.status_code == 200
+            j = jr.json()
+            if j["status"] in ("succeeded", "failed"):
+                break
+            time.sleep(0.1)
+        assert j["status"] == "succeeded", j
+        assert j["result"]["status"] == "completed"
+        assert j["op_uuid"]
+        assert not victim.exists()
+
+        # 审计可查（与同步等价）
+        hist = client.get("/history", params={"limit": 10}).json()
+        assert any(h["op_uuid"] == j["op_uuid"] for h in hist)
+
+    def test_job_not_found(self, client):
+        r = client.get("/job", params={"job_id": "job-nope"})
+        assert r.status_code == 404
+
+    def test_sync_operation_unchanged(self, client, tree):
+        """同步模式行为不变（默认 async_mode=false）。"""
+        _scan(client, tree)
+        src = tree / "readme.txt"
+        r = client.post("/operation", json={
+            "op_type": "copy",
+            "sources": [str(src)],
+            "dest": str(tree / "Program Files"),
+        })
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
+        assert (tree / "Program Files" / "readme.txt").exists()
+
+    def test_stale_marked_after_delete_and_rescan(self, client, tree):
+        """删除后扫描树标记 stale；rescan 后恢复且范围外不变。"""
+        _scan(client, tree)
+        victim = tree / "Users" / "tom" / "AppData" / "Local" / "WeChat"
+        r = client.post("/operation", json={
+            "op_type": "delete", "sources": [str(victim)],
+        })
+        assert r.status_code == 200
+
+        # subtree 透传 stale
+        r = client.get("/subtree", params={"path": str(victim.parent), "depth": 2})
+        assert r.status_code == 200
+        sub = r.json()["subtree"]
+        assert sub.get("stale") is True
+
+        # rescan 后 stale 清除、体积更新
+        r = client.post("/rescan", params={"path": str(victim.parent)})
+        assert r.status_code == 200
+        r = client.get("/subtree", params={"path": str(victim.parent), "depth": 2})
+        sub = r.json()["subtree"]
+        assert "stale" not in sub
+        names = {c["name"] for c in sub.get("children", [])}
+        assert "WeChat" not in names  # 已删除
+
+    def test_rescan_out_of_scope(self, client, tree):
+        _scan(client, tree)
+        r = client.post("/rescan", params={"path": "W:\\nope"})
+        assert r.status_code == 404
+
+    def test_recycle_bin_status(self, client):
+        r = client.get("/recycle_bin_status")
+        assert r.status_code == 200
+        body = r.json()
+        assert "entries" in body and "total_bytes" in body and "per_drive" in body
+
+    def test_recycle_bin_empty_requires_op_uuid(self, client):
+        r = client.post("/recycle_bin/empty", json={"op_uuid": ""})
+        assert r.status_code == 400
+
+    def test_recycle_bin_empty_unknown_op(self, client):
+        r = client.post("/recycle_bin/empty", json={"op_uuid": "no-such-op"})
+        assert r.status_code == 404
+
+    def test_recycle_bin_empty_after_delete(self, client, tree):
+        """删除 → 受控清空该 op 的条目 → 释放字节数返回。"""
+        _scan(client, tree)
+        victim = tree / "Users" / "tom" / "AppData" / "Local" / "WeChat"
+        r = client.post("/operation", json={
+            "op_type": "delete", "sources": [str(victim)],
+        })
+        op_uuid = r.json()["op_uuid"]
+
+        r = client.post("/recycle_bin/empty", json={"op_uuid": op_uuid})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "completed"
+        assert body["emptied"] >= 1  # 至少清掉一个条目
+        assert "不可再撤销" in body["warning"]
+
+
+class TestLegacyRoutesAbsent:
+    """旧路由（/、/poll）不存在。"""
+
+    def test_root_returns_404(self, client):
+        r = client.get("/")
+        assert r.status_code == 404
+
+    def test_poll_removed(self, client):
+        assert client.get("/poll", params={"since": 0}).status_code == 404
 
     def test_shutdown_endpoint(self, client):
         r = client.get("/shutdown")
@@ -198,7 +424,7 @@ class TestFieldReportFixes:
     """回合自 OpenCode 侧真实使用报告的三个 bug（多会话取错/盘符正则无组/裸盘符）。"""
 
     def test_detail_serves_latest_completed_session(self, client, tree, tmp_path):
-        """/detail 与仪表盘必须服务「最新」完成会话，而非字典序首个。"""
+        """/detail 必须服务「最新」完成会话，而非字典序首个。"""
         _scan(client, tree)  # 第一次：google/wechat
 
         b = tmp_path / "b"

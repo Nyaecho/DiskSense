@@ -33,7 +33,7 @@ allowed-tools: Bash, Read, Write
    - `global_anomalies` 中已包含 `magic_type` 字段，无需再调用 `classify_unknown`（该工具仅用于用户指定特定路径时的按需查询）
    - 需要某实体某角色（`cache`/`logs`/`program_base`/`user_data`）下的 Top 5 文件明细时调用 `query_detail`
 
-3. **高亮阶段**：每推理完一个可疑实体，立即调用 `viz_command` 让仪表盘同步闪烁标记（用户可在浏览器 `http://127.0.0.1:58901/` 查看）。一次分析可多次调用叠加。
+3. **标记阶段**：每推理完一个可疑实体，可调用 `viz_command` 记录高亮指令（服务端留存，供审计/回放）。一次分析可多次调用叠加。
 
 4. **执行阶段**：用自然语言向用户展示清理建议，**获得用户明确确认后**，调用 `execute_operation`。执行后调用 `list_recent_ops` 确认日志落盘（记下返回的 `id` 与 `op_uuid`，撤销时要用）。
 
@@ -62,11 +62,43 @@ allowed-tools: Bash, Read, Write
   - 功能：读文件头 16 字节魔数，返回真实格式（仅特定路径按需查询）。
   - 返回：`{"magic_type":"ISO 9660 光盘镜像","mime":"application/x-iso9660-image","confidence":"high"}`
 
-### 3.2 可视化操控（Agent 零前端代码，只传参数）
+- **`dir_stat(path)`**（只读元数据，无需先扫描）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py dir_stat --path "D:\\SomeDir"`
+  - 功能：返回任意目录/文件的 mtime/atime/ctime。当扫描返回 `entities: []`（无已知软件实体）时，用此工具直接查目录时间线。
+  - 返回：`{"path":"...","is_dir":true,"mtime":...,"atime":...,"ctime":...,"size":null}`
+
+- **`search_dirs(pattern, root, top)`**（只读，无需先扫描）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py search_dirs --pattern "*venv*" --root D:/ --top 50`
+  - 功能：fnmatch 通配递归搜索目录**与**文件名（大小写不敏感），适合找散落的 venv/模型目录。命中用户忽略模式的目录不匹配也不下钻。
+  - 返回：`{"dirs":[{"path":"...","size":...,"mtime":...}],"files":[...],"total_dirs_matched":N,"total_files_matched":N,"skipped_inaccessible":N}`（各按大小降序 Top N）
+
+- **`path_size(path)`**（只读，无需先扫描）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py path_size --path "D:\\models"`
+  - 功能：递归测量任意路径体积（跳过链接）。
+  - 返回：`{"path":"...","total_bytes":...,"files":...,"dirs":...,"skipped_inaccessible":0}`
+
+- **`subtree(path, depth)`**（treemap 钻取，需先扫描）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py subtree --path "D:\\work" --depth 2`
+  - 功能：返回已扫描路径下至多 depth 层（1–5，默认 1）的子树聚合，纯内存计算不触盘；单层超 200 项按体积降序截断并附 `omitted` 计数；操作后数据过期时节点带 `stale:true`。
+  - 返回：`{"path":"...","depth":2,"subtree":{"name":"work","value":...,"is_dir":true,"children":[...]}}`
+
+- **伪实体与缓存信号说明**
+  - 扫描无已知软件实体（纯数据盘）时自动按顶层目录生成**伪实体**（`kind:"pseudo"`，指纹带 `pseudo_entities:true`），`query_detail` 照常可用；用户可在偏好 `pseudo_entity_paths` 标记路径优先切分。
+  - 命中内置缓存模式库（pnpm/yarn/pip/conda/huggingface/torch，可在 `config/classification_rules.yaml` 的 `cache_dir_patterns` 扩展）的目录进入指纹 `cache_dirs`（带 `CACHE_DOMINANT:<type>` 信号），不再归入「未归类文件」。
+
+> **边界提示**：以上三工具仅读路径/大小/时间戳元数据（铁律 1 边界内），
+> 且**不能**替代 `execute_operation`——任何删除/移动仍必须走操作工具
+> （回收站 + 可撤销 + 日志审计）。
+
+### 3.2 高亮指令（记录与查询）
 
 - **`viz_command(action, target, payload)`**
   - 命令：`python {SKILL_DIR}/scripts/api_client.py viz_command --action highlight --target '{"id":"wechat"}' --payload '{"color":"#FF4500","label":"卸载残留","effect":"pulse"}'`
-  - `action`：`highlight`（霓虹描边+可选标签）| `label`（浮动短文本）| `group`（虚线关联多个实体，target 用 `{"ids":[...]}`）| `protect`（灰色锁定，target 用 `{"path":"D:/Work"}`）| `clear`（清空全部叠加）
+  - `action`：`highlight`（高亮标记+可选标签）| `label`（短文本标注）| `group`（关联多个实体，target 用 `{"ids":[...]}`）| `protect`（锁定标记，target 用 `{"path":"D:/Work"}`）| `clear`（清空全部叠加）
+  - 返回：`{"status":"ok","seq":N}`（seq 递增，供增量查询）
+- **`query_overlays(since_seq)`**
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py query_overlays --since_seq 0`
+  - 功能：取回 seq 之后的高亮指令增量（环形缓冲最近 100 条），供回溯分析过程。
 
 ### 3.3 文件操作
 
@@ -75,6 +107,17 @@ allowed-tools: Bash, Read, Write
   - `op_type`：`move` | `copy` | `delete` | `compress`
   - **删除自动走回收站**，绝不永久擦除；每次操作返回 `op_uuid`，逐源结果在 `results`
   - 返回：`{"op_uuid":"...","status":"completed","results":[{"source":"...","status":"done","recycle_bin_name":"$R..."}]}`
+- **`execute_operation --async`（大体积操作异步模式）**
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py execute_operation --op_type delete --sources '["D:\\big"]' --async --wait`
+  - 功能：大体积操作（如十几 GB 删除）立即返回 `job_id`（HTTP 202），后台执行；`--wait` 可选轮询到结束。审计/回收站/撤销与同步完全等价。
+  - 返回：`{"status":"accepted","job_id":"job-xxxx","message":"..."}`
+- **`query_job(job_id)`**
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py query_job --job_id job-xxxx --wait`
+  - 功能：查询异步任务状态与进度；`--wait` 轮询直到结束。状态：`pending|running|succeeded|failed|interrupted`（服务重启后运行中任务标记 interrupted）。
+  - 返回：`{"job_id":"...","status":"succeeded","progress":1.0,"result":{"op_uuid":"..."}}`
+- **`rescan(path)`**（增量重扫，需先扫描）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py rescan --path "D:\\work"`
+  - 功能：操作后扫描数据过期（stale）时，仅重扫指定路径并合并进会话，无需全盘重扫。
 
 ### 3.4 回滚与审计
 
@@ -86,6 +129,14 @@ allowed-tools: Bash, Read, Write
   - 命令：`python {SKILL_DIR}/scripts/api_client.py undo_operation --op_id 1`
   - 功能：五步预检（状态锁定→父目录存活→冲突重命名→权限校验→物理还原），按 `op_uuid` 整批回滚，单条失败不阻断。
   - 返回：`{"status":"success|partial|failed","restored":[...],"failed":[...],"skipped":[...]}`
+- **`recycle_bin_status()`**（只读）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py recycle_bin_status`
+  - 功能：回收站当前占用（条目数、总字节，按盘分解）——删除后确认空间是否真正释放。
+  - 返回：`{"entries":N,"total_bytes":N,"per_drive":{"C:":{"entries":N,"bytes":N}}}`
+- **`empty_recycle_bin(op_uuid)`**（受控清空，需确认）
+  - 命令：`python {SKILL_DIR}/scripts/api_client.py empty_recycle_bin --op_uuid <删除操作返回的 op_uuid>`
+  - 功能：**仅**永久删除指定操作产生的回收站条目（逐条校验原始路径匹配，不误清其他来源；不提供全清）。**清空后不可撤销**，执行前必须向用户重申。
+  - 返回：`{"status":"completed","op_uuid":"...","freed_bytes":N,"emptied":N,"mismatch":0,"warning":"已永久删除的条目不可再撤销"}`
 
 ### 3.5 用户偏好
 
@@ -95,7 +146,7 @@ allowed-tools: Bash, Read, Write
 ## 4. 输出格式要求
 
 - **禁止**把冗长 JSON 原文直接丢给用户；必须用自然语言总结，例如：
-  - *"发现微信占用 4.2GB，其中缓存 2.3GB（45 天未清理），建议清理。已在仪表盘红色高亮。"*
+  - *"发现微信占用 4.2GB，其中缓存 2.3GB（45 天未清理），建议清理。已标记为高优先清理目标。"*
   - *"撤销失败：原始文件夹 D:\Work 已被删除，无法还原。建议手动从回收站恢复。"*
 - 汇报尺寸时用 GB/MB，文件数用千分位。
 - 每次执行破坏性操作前重申一句回收站保障，让用户放心确认。

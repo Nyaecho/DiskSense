@@ -36,7 +36,7 @@ DiskSense 不是独立的可执行程序，而是一个 **Agent Skill 包**：`S
 | 极速扫描 | 本地 NTFS 盘优先 MFT 直读（需管理员，自动降级多线程 os.scandir） |
 | 指纹聚合 | 百万文件 → 50~200 个「软件实体」档案（≤5000 Token），附语义信号 |
 | 语义信号 | `CACHE_DOMINANT`、`EXE_MISSING` 等结构化规则信号，Agent 即时推理 |
-| 可视化 | 浏览器 Treemap 仪表盘（D3 内嵌，离线可开），Agent 可远程高亮/标注 |
+| 高亮指令 | `viz_command` 记录高亮/标注指令（环形缓冲，可增量查询回放） |
 | 可逆操作 | 删除强制回收站 + $R 精确映射 + SQLite 日志 + 五步回滚 |
 | 用户记忆 | 保护路径 / 标签 / 忽略模式持久化 |
 
@@ -48,9 +48,6 @@ pip install -r requirements.txt
 
 # 2. 验证安装（自动拉起服务并扫描 D:\ 某目录）
 python scripts/api_client.py start_scan --drive D:/some/dir
-
-# 3. 打开仪表盘
-start http://127.0.0.1:58901/
 ```
 
 服务按需自动启动（首次调用任意工具时拉起），**空闲 5 分钟自动退出**，扫描进行中永不退出。卸载 = 删除整个文件夹。
@@ -92,7 +89,7 @@ Cline 自动加载 `SKILL.md`。聊天框输入「扫描 C 盘」即可。
 **Claude Desktop**：原生 MCP 不支持直接执行脚本，需自行封装 MCP 工具
 （不推荐，见方案书 §16.2）。
 
-Agent 的完整工作流（扫描 → 信号分析 → 仪表盘高亮 → 确认后执行 → 可回滚）
+Agent 的完整工作流（扫描 → 信号分析 → 标记高亮 → 确认后执行 → 可回滚）
 见 [SKILL.md](SKILL.md)。
 
 ## 手动使用（无 Agent）
@@ -104,23 +101,20 @@ python scripts/api_client.py list_recent_ops       # 查看操作历史
 python scripts/api_client.py undo_operation --op_id 1  # 撤销
 ```
 
-仪表盘：浏览器打开 `http://127.0.0.1:58901/`（扫描后 Treemap 生长）。
-离线报告：`Data/reports/report_*.html`（单文件，无网络也能打开）。
+> 服务仅监听本地回环（127.0.0.1），全部交互经 Agent API 完成。
 
 ## 架构
 
 ```
-用户 ↔ Agent 聊天窗 / 浏览器仪表盘
-        │ 脚本执行(api_client.py)      │ HTTP / WebSocket
-        ▼                              ▼
+用户 ↔ Agent 聊天窗
+        │ 脚本执行(api_client.py) / HTTP
+        ▼
    scripts/launcher.py ──拉起──▶ disk_sense/server.py (FastAPI, 127.0.0.1:58901)
                                       │ asyncio.to_thread
    ┌──────────┬──────────┬───────────┼──────────┬────────────┐
    │ scanner  │aggregator│ rules_engine│file_operator│ undo_manager │
    │ +mft.py  │ +magic.py│ (YAML 规则) │(回收站$I/$R)│(SQLite+五步) │
    └──────────┴──────────┴───────────┴──────────┴────────────┘
-                                      │
-                              templates/template.html（D3 内嵌仪表盘）
 ```
 
 模块速览（详见各文件 docstring）：
@@ -134,8 +128,7 @@ python scripts/api_client.py undo_operation --op_id 1  # 撤销
 | `file_operator.py` | SHFileOperationW 回收站删除、$I 快照比对、五步回滚 |
 | `undo_manager.py` | SQLite 操作日志、批量原子性、超期归档 |
 | `preferences.py` | filelock + 原子写入的用户偏好 |
-| `server.py` | 全部端点、WS Hub、空闲自毁、单例锁 |
-| `report.py` | 模板渲染 + 离线报告 |
+| `server.py` | 全部端点、叠加层指令缓冲、空闲自毁、单例锁 |
 
 ## API 契约
 
@@ -145,15 +138,23 @@ python scripts/api_client.py undo_operation --op_id 1  # 撤销
 | `/result` | GET | `?session_id` | 会话状态/进度/指纹 |
 | `/detail` | GET | `?entity_id&category` | 实体某角色 Top5 文件（数组） |
 | `/classify` | POST | `{"path"}` | `{"magic_type","mime","confidence"}` |
-| `/viz` | POST | `{"action","target","payload"}` | `{"status":"ok","seq"}` |
+| `/viz` | POST | `{"action","target","payload"}` | `{"status":"ok","seq"}`（写入指令缓冲） |
+| `/overlays` | GET | `?since_seq` | `{"overlays":[...]}`（seq 之后的高亮指令增量，最近 100 条） |
 | `/operation` | POST | `{"op_type","sources","dest"}` | `{"op_uuid","status","results"}` |
 | `/history` | GET | `?limit` | 操作记录数组 |
 | `/undo` | POST | `{"op_id"}` | `{"status","restored","failed","skipped"}` |
 | `/protect` | POST | `{"path","add"}` | `{"status"}` |
 | `/tag` | POST | `{"path","tag"}` | `{"status"}` |
-| `/ws` | WS | snapshot/progress/scan_complete/overlay/operation 消息 | 实时推送 |
-| `/poll` | GET | `?since` | WS 降级轮询（500ms） |
 | `/health` `/shutdown` | GET | — | 存活探测 / 优雅退出 |
+| `/dir_stat` | GET | `?path` | `{"path","is_dir","mtime","atime","ctime","size"}`（只读，无需扫描） |
+| `/search_dirs` | GET | `?pattern&root&top` | `{"dirs":[...],"files":[...],"total_*_matched","skipped_inaccessible"}`（fnmatch 搜目录与文件，按大小 Top N） |
+| `/path_size` | GET | `?path` | `{"total_bytes","files","dirs","skipped_inaccessible"}`（递归测体积，跳过链接） |
+| `/subtree` | GET | `?path&depth`（depth 1–5，默认 1） | `{"path","depth","subtree":{...}}`（treemap 逐层下钻，纯内存；单层 200 项限流；stale 透传） |
+| `/operation`（异步） | POST | `{...,"async_mode":true}` | HTTP 202 `{"status":"accepted","job_id"}`（后台执行，审计/回收站/撤销与同步等价） |
+| `/job` | GET | `?job_id` | `{"job_id","status":"pending\|running\|succeeded\|failed\|interrupted","progress","result"}` |
+| `/rescan` | POST | `?path` | 增量重扫指定路径并合并进会话（操作后 stale 数据刷新，无需全盘重扫） |
+| `/recycle_bin_status` | GET | — | `{"entries","total_bytes","per_drive"}`（回收站占用，只读） |
+| `/recycle_bin/empty` | POST | `{"op_uuid"}`（必填，不提供全清） | `{"status","freed_bytes","emptied","mismatch","warning"}`（仅清指定操作条目，不可撤销） |
 
 `op_type` ∈ `move|copy|delete|compress`；`action` ∈ `highlight|label|group|protect|clear`。
 删除自动走回收站；**源路径须位于已扫描盘符/目录内**（误操作防线）。
@@ -171,10 +172,10 @@ python scripts/api_client.py undo_operation --op_id 1  # 撤销
 | `scan_api.sync_timeout_sec` | 120 | /scan 同步等待上限 |
 | `idle.shutdown_timeout_sec` | 300 | 空闲自毁阈值 |
 | `history.retention_days` | 30 | 日志归档天数 |
-| `report.max_entities` | 200 | 指纹实体数上限（Token 优化） |
 
 信号规则：`config/classification_rules.yaml`（结构化条件树，SafeEvaluator 评估）。
-用户偏好（保护路径/标签/忽略）运行时存于 `Data/user_preferences.json`。
+同文件还定义**缓存目录模式库** `cache_dir_patterns`（pnpm/yarn/pip/conda/huggingface/torch 等内置，可扩展）：命中目录在指纹 `cache_dirs` 中带 `CACHE_DOMINANT:<type>` 信号，不归入「未归类文件」。
+用户偏好（保护路径/标签/忽略/伪实体标记 `pseudo_entity_paths`）运行时存于 `Data/user_preferences.json`；扫描无已知实体时自动按顶层目录生成伪实体（`kind:"pseudo"`），纯数据盘也能走标准实体分析流程。
 
 ## 隐私与安全
 
@@ -209,7 +210,6 @@ python -m venv .venv
 | 回滚（父目录存续） | ✅ 集成测试 | 冲突重命名/批量部分失败/已撤销跳过 |
 | 误删防护 | ✅ | 无任何永久删除代码路径；保护路径 403 |
 | Token 消耗 | ✅ 指纹 JSON < 20KB 断言 | ~5000 Token 预算 |
-| 仪表盘 | ✅ 浏览器实测 | 14 瓷贴/三类叠加层/表格视图/离线报告 |
 | 端到端旅程 | ✅ 全链路冒烟 | 方案书 §17 十三步全部走通 |
 | 扫描速度（1TB HDD ≤45s） | ⏳ 待真机验收 | MFT 路径需管理员环境实测 |
 | 单例锁并发 10 次 | ⏳ 待专项压测 | filelock + 端口绑定双保险已实现 |
@@ -226,10 +226,10 @@ python -m venv .venv
 3. **回收站映射用 $I 文件解析而非 Shell.NameSpace 枚举**：方案书 §12.2 的
    名称比对在 Win10/11 下拿不到物理 $R 名；直接解析
    `$Recycle.Bin\<SID>\$I` 二进制（兼容长度前缀与 NUL 两种布局）得到精确映射。
-4. **新增模块 `models.py` / `mft.py` / `magic.py` / `report.py`**：方案书 §16.1
-   清单的合理细化（Node 树共享、MFT 解析独立可测、魔数库独立、渲染独立）。
+4. **新增模块 `models.py` / `mft.py` / `magic.py`**：方案书 §16.1
+    清单的合理细化（Node 树共享、MFT 解析独立可测、魔数库独立）。
 5. **指纹 JSON 附加字段**：`signals_legend`（帮助 Agent 理解信号）、`treemap`
-   （仪表盘数据）、实体 `display`/`location_anomaly`/`tags`——均为超集，不破坏
+   （层级聚合数据）、实体 `display`/`location_anomaly`/`tags`——均为超集，不破坏
    方案书 §7.3 结构。
 6. **新增伪实体 `system-temp`**：AppData\Local\Temp 与 Windows\Temp 的无主缓存
    归入「系统临时文件」实体（方案书未定义，清理建议高价值目标）。
@@ -237,9 +237,7 @@ python -m venv .venv
    （方案书 §15「属于本次扫描盘符」的更严格实现）。
 8. **`/operation` 同步执行**：返回 `completed` + 逐源 `results`（方案书示例的
    `queued` 为异步队列语义，当前同步实现更简单且日志一致）。
-9. **仪表盘配色**：按数据可视化规范采用经校验的分类/序数调色板（all-pairs CVD
-   校验通过），非方案书示例中的任意色值；每瓷贴直接标签 + 表格视图满足对比度
-   救济规则。
+9. **`viz` 指令缓冲**：高亮指令写入服务端环形缓冲，`/overlays` 提供增量查询。
 10. **`last_access_days` 语义**：取实体所有文件 `max(mtime, atime)`（NTFS 可能
     关闭访问时间更新，取二者较新者更稳健）。
 
