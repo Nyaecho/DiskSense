@@ -1,10 +1,10 @@
-"""文件操作与回溯执行引擎（方案书 §12）。
+"""文件操作与回溯执行引擎。
 
 铁律 3 落地点：
 - 删除只走 Windows 回收站（SHFileOperationW + FOF_ALLOWUNDO，与
   IFileOperation 同一 Shell 语义），**绝不** ``os.remove``/``shutil.rmtree``；
 - 删除前快照、删除后比对 ``$Recycle.Bin\\<SID>\\$I*`` 文件，解析新增
-  $I 元数据（原始路径/大小/删除时间）获得**精确的 $R 映射**（方案书 §12.2），
+  $I 元数据（原始路径/大小/删除时间）获得**精确的 $R 映射**，
   撤销时按 $R 物理文件名一步还原，无事后匹配误差；
 - 一切操作经 UndoManager 落 SQLite 日志（先日志后执行）；
 - 保护路径（用户偏好）直接拒绝。
@@ -347,7 +347,7 @@ class FileOperator:
 
     # ------------------------------------------------------------------
     def delete(self, sources: Sequence[str]) -> dict:
-        """删除到回收站并捕获精确 $R 映射（方案书 §12.1/§12.2）。"""
+        """删除到回收站并捕获精确 $R 映射。"""
         sources = [s for s in sources if s]
         self._check_protection(sources)
         missing = [s for s in sources if not os.path.exists(s)]
@@ -512,7 +512,7 @@ class FileOperator:
 
 
 # ---------------------------------------------------------------------------
-# 五步回滚（方案书 §12.4）
+# 五步回滚
 # ---------------------------------------------------------------------------
 def _conflict_free_target(target: str) -> str:
     """防覆盖：目标已存在时改为 base_restored_N.ext。"""
@@ -569,7 +569,7 @@ def _find_recycle_item_by_source(source: str) -> Optional[str]:
 def execute_undo(op_id: int, undo: UndoManager) -> dict:
     """五步预检回滚：状态锁定 → 父目录存活 → 冲突重命名 → 权限 → 物理还原。
 
-    按 op_uuid 整批回滚，单条失败不阻断其余（方案书 §12.5）。
+    按 op_uuid 整批回滚，单条失败不阻断其余。
     """
     entry = undo.get_entry(op_id)
     if entry is None:

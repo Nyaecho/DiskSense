@@ -1,4 +1,4 @@
-# DiskSense 语义信号规则（方案书 §8）
+# DiskSense 语义信号规则
 #
 # 设计哲学：代码中绝不出现硬编码的软件名判断；所有"聪明话"由 Agent 基于这些
 # 客观信号即时推理生成。本文件只定义结构化条件，由 rules_engine.SafeEvaluator

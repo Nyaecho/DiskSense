@@ -1,4 +1,4 @@
-"""打包 Skill 交付物 ZIP（方案书 §16.1 + cc-switch 兼容）。
+"""打包 Skill 交付物 ZIP（cc-switch 兼容）。
 
 cc-switch 的 install_from_zip 逻辑（src/services/skill.rs）：
 解压 → 递归扫描含 SKILL.md 的目录 → 按 SKILL.md 的 name 安装到

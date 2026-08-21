@@ -1,4 +1,4 @@
-"""扫描调度器（方案书 §6 极速扫描引擎）。
+"""扫描调度器（极速扫描引擎）。
 
 职责：
 1. 主动探测盘符类型（GetDriveTypeW），本地硬盘优先 MFT 直读；
@@ -68,7 +68,7 @@ _DRIVE_FIXED = 3  # GetDriveTypeW: DRIVE_FIXED 本地硬盘
 _DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/]*$")
 
 # Windows 重解析标记（st_reparse_tag）：挂载点与符号链接均不下钻，
-# 防止 C:\Documents and Settings → C:\Users 一类的死循环（方案书 §6.4）
+# 防止 C:\Documents and Settings → C:\Users 一类的死循环
 _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 _IO_REPARSE_TAG_SYMLINK = 0xA000000C
 
@@ -153,7 +153,7 @@ class _WalkState:
                 self._cb(progress, self.files, self.bytes)
 
     def throttle(self) -> None:
-        """方案书 §14.4：每处理 throttle_every 个文件主动让出 CPU 时间片。"""
+        """每处理 throttle_every 个文件主动让出 CPU 时间片。"""
         with self.lock:
             self._since_throttle += 1
             due = self._since_throttle >= self._cfg.throttle_every
@@ -320,7 +320,7 @@ def scan(
 ) -> ScanResult:
     """扫描入口：本地 NTFS 硬盘走 MFT 快速路径，否则多线程 walk。
 
-    主动探测盘符类型（方案书 §6.2），避免"先报错再降级"。
+    主动探测盘符类型，避免"先报错再降级"。
     """
     cfg = cfg or ScanConfig()
     target = _normalize_target(target)

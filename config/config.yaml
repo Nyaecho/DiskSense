@@ -1,4 +1,4 @@
-# DiskSense 运行配置（方案书 §3 / §5 / §14）
+# DiskSense 运行配置
 # 说明：所有键均可省略，省略时使用代码内置默认值（见 disk_sense/config.py）
 
 server:

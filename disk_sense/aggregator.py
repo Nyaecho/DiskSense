@@ -1,4 +1,4 @@
-"""指纹聚合器（方案书 §7，Token 优化的核心）。
+"""指纹聚合器（Token 优化的核心）。
 
 不把百万条文件路径塞给 LLM，而是聚合为 50~200 个「软件实体」，
 令指纹档案 JSON 控制在 ~5000 Token 内。
@@ -13,7 +13,7 @@
 4. 未归类的大文件进入 global_anomalies，批量完成魔数识别，
    Agent 无需逐个查询。
 
-附加（超出方案书、服务于 treemap 数据与 /detail）：
+附加（服务于 treemap 数据与 /detail）：
 - treemap 树形数据；
 - 每实体每角色的 Top5 文件（供 query_detail，不进入 JSON）；
 - 「系统临时文件」伪实体（AppData\\Local\\Temp 与 Windows\\Temp 的
@@ -152,7 +152,7 @@ class Aggregator:
 
     # ------------------------------------------------------------------
     def aggregate(self, result: ScanResult, session_id: str) -> dict:
-        """执行聚合，返回方案书 §7.3 形状的指纹档案（附加 treemap/legend）。"""
+        """执行聚合，返回指纹档案（附加 treemap/legend）。"""
         root = result.root
         self._collect_seeds(root)
 

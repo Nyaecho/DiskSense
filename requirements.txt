@@ -1,5 +1,5 @@
 # DiskSense 运行依赖（Windows 10/11, Python 3.10+）
-# 方案书 §3.2；补充 requests：方案书中 launcher.py / api_client.py 均使用其发起 HTTP 健康检查与 API 调用，原清单遗漏
+# 补充 requests：launcher.py / api_client.py 均使用其发起 HTTP 健康检查与 API 调用
 pywin32>=306
 psutil>=5.9.0
 pyyaml>=6.0

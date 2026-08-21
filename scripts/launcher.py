@@ -1,4 +1,4 @@
-"""DiskSense 服务启动/停止脚本（方案书 §5 便携启动与生命周期）。
+"""DiskSense 服务启动/停止脚本（便携启动与生命周期）。
 
 - 健康检查：http://localhost:58901/health（端口读自 config/config.yaml）
 - 单例：filelock 原子锁消除 Check-Then-Act 竞态；服务进程自身也持锁

@@ -1,10 +1,10 @@
-"""文件头魔数识别（方案书铁律 1 的唯一豁免点）。
+"""文件头魔数识别（铁律 1 的唯一豁免点）。
 
 本模块是全仓库**唯一**允许打开文件读取字节的地方，且只读文件头
 16 字节（及 ISO/TAR 等格式的固定小偏移），用于格式判定：
 - 绝不解析内容；
 - 绝不记录读取到的字节；
-- 读取前先判断实际占用大小，避免稀疏文件副作用（方案书 §6.5）。
+- 读取前先判断实际占用大小，避免稀疏文件副作用。
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def classify_magic_number(path: str) -> dict:
     if st.st_size < _HEADER_LEN:
         return {"magic_type": "EMPTY_OR_SPARSE", "mime": "", "confidence": "low"}
 
-    # 稀疏/压缩文件：实际占用明显小于逻辑大小 → 不触发读取（方案书 §6.5）
+    # 稀疏/压缩文件：实际占用明显小于逻辑大小 → 不触发读取
     allocated = _allocated_size(path, st.st_size)
     if allocated is not None and 0 < allocated < st.st_size:
         return {"magic_type": "SPARSE", "mime": "", "confidence": "low"}

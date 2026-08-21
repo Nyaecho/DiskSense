@@ -19,7 +19,7 @@ def f(name, mb, mtime_days_ago=10, atime_days_ago=10):
 
 
 def build_tree():
-    """模拟典型 C 盘（镜像方案书 §7.3 微信场景）。"""
+    """模拟典型 C 盘（微信场景）。"""
     root = Node("C:", is_dir=True, children={})
 
     pf = Node("Program Files", is_dir=True, children={})
@@ -268,7 +268,7 @@ class TestAggregate:
         assert google["tags"] == ["浏览器"]
 
     def test_token_budget(self, fingerprint):
-        """方案书 §7.1：指纹 JSON 应控制在 ~5000 Token（约 20KB 文本）内。"""
+        """指纹 JSON 应控制在 ~5000 Token（约 20KB 文本）内。"""
         import json
 
         _, fp = fingerprint

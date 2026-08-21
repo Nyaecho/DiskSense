@@ -146,7 +146,7 @@ class TestRulesEngine:
         assert eng.evaluate(E) == []
 
     def test_cache_dominant_and_large_entity(self):
-        """方案书 §7.3 微信式的缓存膨胀场景。"""
+        """微信式的缓存膨胀场景。"""
         eng = RulesEngine.from_yaml(RULES_FILE)
         e = _entity(program_base=120, user_data=1800, cache=5000, logs=10)
         hits = eng.evaluate(e)

@@ -153,7 +153,7 @@ class TestExecuteUndo:
         assert execute_undo(404, undo)["status"] == "failed"
 
     def test_batch_undo_partial(self, tmp_path):
-        """批量原子性：整批逐条回滚，单条失败不阻断（方案书 §12.5）。"""
+        """批量原子性：整批逐条回滚，单条失败不阻断。"""
         undo, op = self._setup(tmp_path)
         f1, f2 = tmp_path / "1.txt", tmp_path / "2.txt"
         f1.write_text("a")
@@ -236,7 +236,7 @@ class TestFileOperator:
 @pytest.mark.skipif(sys.platform != "win32", reason="回收站仅 Windows")
 class TestRealRecycleBin:
     def test_delete_capture_and_restore(self, tmp_path):
-        """端到端：删除 → $R 精确映射捕获 → 撤销还原（方案书 §12.1/§12.2）。"""
+        """端到端：删除 → $R 精确映射捕获 → 撤销还原。"""
         undo = UndoManager(tmp_path / "op_log.db")
         op = FileOperator(undo, session_id="it")
         target = tmp_path / f"disksense_{uuid.uuid4().hex[:8]}.bin"

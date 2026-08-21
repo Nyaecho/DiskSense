@@ -1,9 +1,9 @@
-"""FastAPI 本地核心服务（方案书 §11 API 契约 / §14 并发模型）。
+"""FastAPI 本地核心服务（API 契约 / 并发模型）。
 
 纯 Agent API 服务：Agent 经 scripts/api_client.py 调用；
 高亮指令经 /viz 写入环形缓冲，Agent 轮询 /overlays 取回增量。
 
-并发模型（方案书 §14.3）：扫描、文件操作等同步阻塞全部经
+并发模型：扫描、文件操作等同步阻塞全部经
 ``asyncio.to_thread`` 委派线程池，事件循环永不阻塞。
 
 生命周期：
@@ -173,7 +173,7 @@ class AppState:
         return max(completed, key=lambda s: s.started_at, default=None)
 
     def scanned_roots(self) -> set[str]:
-        """操作范围键集合（方案书 §15）：完整盘符扫描给盘根键，目录扫描给前缀键。"""
+        """操作范围键集合：完整盘符扫描给盘根键，目录扫描给前缀键。"""
         roots: set[str] = set()
         for s in self.sessions.values():
             m = _DRIVE_RE.match(s.target)
@@ -209,7 +209,7 @@ def _source_scope_key(src: str) -> str:
 
 
 def _source_in_scope(allowed: set[str], src: str) -> bool:
-    """操作范围校验（方案书 §15）。
+    """操作范围校验。
 
     allowed 混合两种键：整盘根（"C:"，仅当扫描目标是完整盘符）与
     具体目录前缀（小写绝对路径）。源在任一范围内即放行。
@@ -236,7 +236,7 @@ async def _validate_operation(state: "AppState", req: "OperationRequest") -> Non
     if not req.sources:
         raise HTTPException(400, "sources 不能为空")
 
-    # 操作范围校验（方案书 §15）：已有扫描记录时，源须位于已扫描范围内
+    # 操作范围校验：已有扫描记录时，源须位于已扫描范围内
     if state.sessions:
         allowed = state.scanned_roots()
         for src in req.sources:
@@ -503,7 +503,7 @@ def create_app(
         if not target or not valid:
             raise HTTPException(400, f"无效的扫描目标: {target}")
 
-        # 已有扫描进行中 → 返回该会话（方案书：单扫描任务）
+        # 已有扫描进行中 → 返回该会话（单扫描任务）
         with state.scan_lock:
             for s in state.sessions.values():
                 with s.lock:
@@ -522,7 +522,7 @@ def create_app(
             state.scan_thread = t
         t.start()
 
-        # 同步等待上限（方案书 §11.2），超时返回 scanning 交给客户端轮询
+        # 同步等待上限，超时返回 scanning 交给客户端轮询
         deadline = time.time() + state.cfg.scan_api.sync_timeout_sec
         while time.time() < deadline:
             if session.status != "scanning":
@@ -909,7 +909,7 @@ def create_app(
         return {"status": "shutting_down"}
 
     async def _idle_watchdog() -> None:
-        """空闲自毁（方案书 §5.3）：扫描进行中永不触发。"""
+        """空闲自毁：扫描进行中永不触发。"""
         timeout = state.cfg.idle.shutdown_timeout_sec
         while not state.shutdown_event.is_set():
             await asyncio.sleep(min(10, max(1, timeout / 10)))
@@ -970,7 +970,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    # 资源治理（方案书 §14.1）：后台进程降低 CPU 优先级
+    # 资源治理：后台进程降低 CPU 优先级
     if sys.platform == "win32":
         try:
             import psutil

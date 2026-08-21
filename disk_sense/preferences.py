@@ -1,4 +1,4 @@
-"""用户偏好与长期记忆系统（方案书 §13）。
+"""用户偏好与长期记忆系统。
 
 持久化于 ``Data/user_preferences.json``：
 - 保护路径（protected_paths）：任何文件操作直接拒绝；
@@ -7,7 +7,7 @@
 - 自动清理规则（auto_clean_rules）：供 Agent 生成建议时参考。
 
 写入策略：FileLock 互斥 + 临时文件 fsync + os.replace 原子替换，
-进程在任何时刻崩溃都不会留下半截 JSON（方案书 §13.2）。
+进程在任何时刻崩溃都不会留下半截 JSON。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""DiskSense API 客户端（Agent 的工具执行入口，方案书 §5.5）。
+"""DiskSense API 客户端（Agent 的工具执行入口）。
 
 约定：
 - **stdout 只输出最终 JSON**（Agent 读取），进度信息走 stderr；
@@ -85,7 +85,7 @@ def call_api(endpoint: str, method: str = "POST", data=None, params=None, timeou
 
 
 def call_scan_with_polling(drive: str, timeout: int = 180) -> dict:
-    """POST /scan → 若仍在扫描则内部轮询 /result（方案书：Agent 单次调用）。"""
+    """POST /scan → 若仍在扫描则内部轮询 /result（Agent 单次调用）。"""
     result = call_api("scan", data={"drive": drive}, timeout=timeout + 30)
 
     if result.get("status") == "scanning":

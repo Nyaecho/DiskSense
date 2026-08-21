@@ -1,10 +1,10 @@
-"""NTFS MFT 直读扫描器（快速路径，方案书 §6.1 主路径）。
+"""NTFS MFT 直读扫描器（快速路径主路径）。
 
 通过 ``ctypes`` 打开 ``\\\\.\\X:`` 卷句柄，FSCTL_GET_NTFS_VOLUME_DATA 定位
 $MFT 后顺序解析 FILE 记录（应用 Fixup、解析 $FILE_NAME 属性），一次性获得
 全卷文件元数据，速度接近 Everything。
 
-权限模型（方案书 §6.3 第一层）：尝试启用 SeBackupPrivilege；失败或无管理员
+权限模型（第一层）：尝试启用 SeBackupPrivilege；失败或无管理员
 权限时抛出 :class:`MFTUnavailableError`，由 scanner 静默降级到 os.walk。
 本模块**只读取元数据**，绝不修改 ACL（禁用 takeown/icacls 铁律）。
 
@@ -303,7 +303,7 @@ def _is_admin() -> bool:
 
 
 def _enable_backup_privilege() -> bool:
-    """尽力启用 SeBackupPrivilege（方案书 §6.3 第一层提权）。"""
+    """尽力启用 SeBackupPrivilege（第一层提权）。"""
     try:
         import pywintypes  # noqa: F401
         import win32api

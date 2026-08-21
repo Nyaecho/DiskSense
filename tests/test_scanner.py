@@ -136,7 +136,7 @@ def test_unicode_names(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Junction 仅 Windows")
 def test_junction_not_traversed(tmp_path):
-    """Junction 指向含文件的目录：自身可见但不下钻（死循环防护，方案书 §6.4）。"""
+    """Junction 指向含文件的目录：自身可见但不下钻（死循环防护）。"""
     real = tmp_path / "real"
     real.mkdir()
     (real / "big.bin").write_bytes(b"x" * 500)

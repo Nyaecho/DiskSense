@@ -1,4 +1,4 @@
-"""SQLite 操作日志与批量原子性（方案书 §12.3 / §12.5 / §12.6）。
+"""SQLite 操作日志与批量原子性。
 
 每次文件操作先落日志（ACTIVE）再执行，随后更新 DONE/FAILED——
 先日志后执行保证进程中途崩溃也能追溯。批量操作共享一个 op_uuid，
@@ -126,7 +126,7 @@ class UndoManager:
 
     # ------------------------------------------------------------------
     def archive_expired(self, archive_dir: Path) -> int:
-        """超期日志转存 JSON.gz 并删除（方案书 §12.6，服务空闲时调用）。"""
+        """超期日志转存 JSON.gz 并删除（服务空闲时调用）。"""
         cutoff = (datetime.now() - timedelta(days=self.retention_days)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
