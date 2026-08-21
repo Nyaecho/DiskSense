@@ -63,33 +63,87 @@ python scripts/package_skill.py
 #    安装到 ~/.cc-switch/skills/ 并 symlink 到 ~/.claude/skills/ 等应用目录
 ```
 
-> **不要**直接把整个仓库打成 zip：`.venv/`（上万文件）会撞 cc-switch 的
-> ZIP 条目数上限/解压预算导致安装失败，开发产物也会污染技能目录。
 > cc-switch 的识别规则：解压后递归扫描含 `SKILL.md` 的目录，按 frontmatter
 > 的 `name`（本技能为 `disk-sense-manager`）作为安装名。
 
-### Claude Code（手动）
+### Claude Code
+
+Claude Code 从以下位置发现技能（目录名即调用名 `/disk-sense-manager`）：
+
+| 级别 | 路径 |
+| :--- | :--- |
+| 个人（所有项目可用） | `~/.claude/skills/disk-sense-manager/SKILL.md` |
+| 项目（仅当前仓库） | `<repo>/.claude/skills/disk-sense-manager/SKILL.md` |
+
+安装方式（二选一）：
 
 ```bash
+# 方式 A：解压技能包到个人技能目录
 python scripts/package_skill.py
-unzip dist/disk-sense-manager-skill.zip -d ~/.claude/skills/
+unzip dist/disk-sense-manager-skill.zip -d /tmp/skill
+mv /tmp/skill/disk-sense-manager ~/.claude/skills/
+
+# 方式 B：直接 symlink 仓库目录（开发时改 SKILL.md 即时生效）
+mkdir -p ~/.claude/skills
+mklink /J "%USERPROFILE%\.claude\skills\disk-sense-manager" "<仓库绝对路径>"
 ```
 
-### Cline
+- 会话内输入 `/disk-sense-manager` 显式调用，或直接说"分析 D 盘空间"按
+  description 自动触发
+- 修改 `SKILL.md` 免重启，Claude Code 会热加载
 
-把整个 `DiskSense/` 仓库目录放入 Cline Skills 目录（或配置指向），
-Cline 自动加载 `SKILL.md`。聊天框输入「扫描 C 盘」即可。
+### OpenCode
 
-### OpenAI Assistant / 自定义 Agent
+OpenCode 兼容多家目录约定，以下任一位置均可被发现：
 
-把 `SKILL.md` 内容并入 System Prompt，注册「执行 Python 脚本」工具
-（Bash/Code Interpreter），技能目录作为 `{SKILL_DIR}` 传入。
+| 级别 | 路径 |
+| :--- | :--- |
+| 项目原生 | `<repo>/.opencode/skills/disk-sense-manager/SKILL.md` |
+| 项目 Claude 兼容 | `<repo>/.claude/skills/disk-sense-manager/SKILL.md` |
+| 全局 Claude 兼容 | `~/.claude/skills/disk-sense-manager/SKILL.md` |
+| 全局代理标准 | `~/.agents/skills/disk-sense-manager/SKILL.md` |
 
-**Claude Desktop**：原生 MCP 不支持直接执行脚本，需自行封装 MCP 工具
-（不推荐）。
+安装方式（二选一）：
 
-Agent 的完整工作流（扫描 → 信号分析 → 标记高亮 → 确认后执行 → 可回滚）
-见 [SKILL.md](SKILL.md)。
+```bash
+# 方式 A：装到全局代理标准目录（推荐，Codex 也能识别）
+mkdir -p ~/.agents/skills
+mklink /J "%USERPROFILE%\.agents\skills\disk-sense-manager" "<仓库绝对路径>"
+
+# 方式 B：项目级，仓库内 symlink
+mkdir -p .opencode/skills
+mklink /J .opencode\skills\disk-sense-manager "<仓库绝对路径>"
+```
+
+- OpenCode 从 cwd 向上遍历到 git 根，逐级加载 `.opencode/`、`.claude/`、`.agents/` 下的 `skills/*/SKILL.md`
+- 通过原生 `skill` 工具按需加载：`skill({ name: "disk-sense-manager" })`
+- 注意：OpenCode 要求 frontmatter `name` 全小写连字符且**与目录名一致**（本技能已满足），未知 frontmatter 字段会被忽略
+
+### Codex（OpenAI）
+
+Codex 只认 `.agents/skills` 目录（不认 `.claude/`）：
+
+| 级别 | 路径 |
+| :--- | :--- |
+| 仓库 | `$REPO_ROOT/.agents/skills/disk-sense-manager/SKILL.md`（从 cwd 向上扫描） |
+| 用户 | `~/.agents/skills/disk-sense-manager/SKILL.md` |
+
+安装方式（二选一）：
+
+```bash
+# 方式 A：用户级（所有仓库可用）
+mkdir -p ~/.agents/skills
+mklink /J "%USERPROFILE%\.agents\skills\disk-sense-manager" "<仓库绝对路径>"
+
+# 方式 B：仓库级（随 git 分发给协作者）
+mkdir -p .agents/skills
+mklink /J .agents\skills\disk-sense-manager "<仓库绝对路径>"
+```
+
+- 显式调用：`$disk-sense-manager`；也可按 description 隐式触发
+- Codex 支持 symlink，会跟随到目标目录读取 `SKILL.md`
+- 可选：在技能目录加 `agents/openai.yaml` 配置 `allow_implicit_invocation: false` 禁止隐式触发
+
 
 ## 手动使用（无 Agent）
 
