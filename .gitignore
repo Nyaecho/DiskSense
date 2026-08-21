@@ -32,3 +32,9 @@ Thumbs.db
 desktop.ini
 .DS_Store
 dist/
+
+# openspec
+.claude/
+.opencode/
+.github/
+openspec/

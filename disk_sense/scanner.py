@@ -21,13 +21,48 @@ import sys
 import threading
 import time
 from fnmatch import fnmatch
+from pathlib import Path
 from typing import Optional, Sequence
 
-from .config import ScanConfig, default_scan_workers
+from .config import RULES_FILE, ScanConfig, default_scan_workers
 from .models import Node, ProgressCallback, ScanResult, finalize_tree
 from .mft import MFTUnavailableError, scan_via_mft
 
 logger = logging.getLogger(__name__)
+
+
+def load_cache_dir_patterns(path: Path | str | None = None) -> list[tuple[str, str]]:
+    """从 classification_rules.yaml 加载缓存目录模式库 [(pattern, type), ...]。
+
+    文件缺失或段缺失时返回空列表（零配置可运行）；格式非法的条目跳过并告警。
+    """
+    import yaml
+
+    p = Path(path) if path else RULES_FILE
+    if not p.exists():
+        return []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as e:
+        logger.warning("缓存模式库加载失败（忽略）: %s", e)
+        return []
+    patterns: list[tuple[str, str]] = []
+    for raw in data.get("cache_dir_patterns", []) or []:
+        if isinstance(raw, dict) and raw.get("pattern") and raw.get("type"):
+            patterns.append((str(raw["pattern"]), str(raw["type"])))
+        else:
+            logger.warning("缓存模式条目格式非法，已跳过: %r", raw)
+    return patterns
+
+
+def match_cache_pattern(name: str, patterns: Sequence[tuple[str, str]]) -> Optional[str]:
+    """目录名命中缓存模式库时返回类型标注，否则 None（大小写不敏感）。"""
+    low = name.lower()
+    for pattern, ctype in patterns:
+        if fnmatch(low, pattern.lower()):
+            return ctype
+    return None
 
 _DRIVE_FIXED = 3  # GetDriveTypeW: DRIVE_FIXED 本地硬盘
 _DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/]*$")
@@ -36,6 +71,22 @@ _DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/]*$")
 # 防止 C:\Documents and Settings → C:\Users 一类的死循环（方案书 §6.4）
 _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 _IO_REPARSE_TAG_SYMLINK = 0xA000000C
+
+
+def match_ignore(name: str, ignores: Sequence[str]) -> bool:
+    """判断目录名是否命中忽略模式（大小写不敏感 fnmatch）。
+
+    扫描遍历与元数据搜索共用，保证两者忽略行为一致。
+
+    Args:
+        name: 目录名（非完整路径）。
+        ignores: 忽略模式列表（来自配置 default_dir_ignores 与用户偏好）。
+
+    Returns:
+        是否命中任一模式。
+    """
+    low = name.lower()
+    return any(fnmatch(low, g.lower()) for g in ignores)
 
 
 def get_drive_type(target: str) -> int:
@@ -138,6 +189,8 @@ def scan_via_walk(
     if not os.path.exists(target):
         raise FileNotFoundError(f"扫描目标不存在: {target}")
 
+    cache_patterns = load_cache_dir_patterns()
+
     m = _DRIVE_RE.match(target + "\\")
     display = f"{m.group(1).upper()}:" if m else os.path.basename(target.rstrip("\\/"))
     root = Node(name=display, is_dir=True, children={})
@@ -145,8 +198,7 @@ def scan_via_walk(
     all_ignores = list(cfg.default_dir_ignores) + list(ignore_globs)
 
     def ignored(name: str) -> bool:
-        low = name.lower()
-        return any(fnmatch(low, g.lower()) for g in all_ignores)
+        return match_ignore(name, all_ignores)
 
     state = _WalkState(cfg, progress_cb)
     skipped: list[str] = []
@@ -165,7 +217,7 @@ def scan_via_walk(
                 continue
             dir_path, parent_node = item
             try:
-                _scan_one_dir(dir_path, parent_node, task_q, state, skipped, ignored, cancel_event)
+                _scan_one_dir(dir_path, parent_node, task_q, state, skipped, ignored, cancel_event, cache_patterns)
             except Exception as e:  # noqa: BLE001 — 单目录失败不应终止整体扫描
                 errors.append(e)
             finally:
@@ -213,6 +265,7 @@ def _scan_one_dir(
     skipped: list,
     ignored,
     cancel_event: Optional[threading.Event],
+    cache_patterns: Sequence[tuple[str, str]] = (),
 ) -> None:
     """扫描单个目录：子目录入队，文件建叶节点；权限不足记入 skipped（受限区域）。"""
     try:
@@ -242,6 +295,7 @@ def _scan_one_dir(
                     )
                 else:
                     node = Node(name, mtime=st.st_mtime, atime=st.st_atime, is_dir=True, children={})
+                    node.cache_type = match_cache_pattern(name, cache_patterns)
                     children[name] = node
                     task_q.put((entry.path, node))
                     state.add_task()

@@ -20,6 +20,9 @@ class Node:
         mtime / atime: 修改/访问时间（Unix 时间戳，秒）。
         is_dir: 是否目录。
         is_link: 是否 Junction/符号链接（不向下遍历，防死循环）。
+        cache_type: 命中缓存目录模式库时的类型标注（如 pnpm/huggingface），
+            否则为 None；聚合时据此打 CACHE_DOMINANT:<type> 信号。
+        stale: 变更操作后标记为过期（scan-invalidation）；查询端点透传。
         children: 子节点映射（仅目录拥有；文件为 None 以节省内存）。
     """
 
@@ -29,6 +32,9 @@ class Node:
     atime: float = 0.0
     is_dir: bool = False
     is_link: bool = False
+    cache_type: Optional[str] = None
+    stale: bool = False
+    stale_since: float = 0.0
     children: Optional[dict[str, "Node"]] = None
 
     def add_child(self, child: "Node") -> None:

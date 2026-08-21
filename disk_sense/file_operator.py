@@ -18,6 +18,7 @@ import ctypes
 import logging
 import os
 import shutil
+import stat
 import struct
 import sys
 import time
@@ -188,6 +189,129 @@ def _diff_new_i(drive_root: str, before: dict[str, str]) -> list[dict]:
 
 def _norm(path: str) -> str:
     return os.path.abspath(path).lower().replace("/", "\\")
+
+
+def recycle_bin_status() -> dict:
+    """统计各盘 $Recycle.Bin 的条目数与总字节（只读，recycle-bin-control）。
+
+    遍历所有固定盘的 $Recycle.Bin/<SID>/$I* 文件，解析元数据取原始大小；
+    不可读的 SID 目录静默跳过。非 Windows 抛 FileOperatorError。
+    """
+    if sys.platform != "win32":
+        raise FileOperatorError("回收站功能仅支持 Windows")
+    import string
+
+    entries = 0
+    total_bytes = 0
+    per_drive: dict[str, dict] = {}
+    for letter in string.ascii_uppercase:
+        drive = f"{letter}:\\"
+        if not os.path.isdir(drive):
+            continue
+        rb = Path(drive) / "$Recycle.Bin"
+        if not rb.exists():
+            continue
+        d_entries = 0
+        d_bytes = 0
+        for sid_dir in _iter_safely(rb):
+            for item in _iter_safely(sid_dir):
+                if item.name[:2].upper() != "$I" or not item.is_file():
+                    continue
+                try:
+                    info = parse_i_file(item.read_bytes())
+                except OSError:
+                    continue
+                if info is None:
+                    continue
+                d_entries += 1
+                d_bytes += info.get("size") or 0
+        if d_entries:
+            per_drive[f"{letter}:"] = {"entries": d_entries, "bytes": d_bytes}
+            entries += d_entries
+            total_bytes += d_bytes
+    return {"entries": entries, "total_bytes": total_bytes, "per_drive": per_drive}
+
+
+def _iter_safely(path: Path):
+    """迭代目录，权限不足静默跳过（权限铁律）。"""
+    try:
+        return list(path.iterdir())
+    except (PermissionError, OSError):
+        return []
+
+
+def empty_recycle_bin_for_op(op_uuid: str, undo) -> dict:
+    """受控清空：仅永久删除指定 op_uuid 产生的回收站条目。
+
+    安全策略（design.md D5）：
+    - 从审计日志取该 op_uuid 的全部 DONE 且带 recycle_path 的条目；
+    - 逐条校验 $I 文件仍存在且解析出的原始路径/大小与日志匹配；
+    - 匹配则删除 $I/$R 对；不匹配则跳过并计入 mismatch（宁可不删也不误删）；
+    - 清空后条目不可撤销：把日志条目标记 EMPTIED。
+    """
+    if sys.platform != "win32":
+        raise FileOperatorError("回收站功能仅支持 Windows")
+    rows = undo.get_batch(op_uuid)
+    if not rows:
+        return {"status": "error", "error": f"操作不存在: {op_uuid}", "freed_bytes": 0,
+                "emptied": 0, "mismatch": 0}
+
+    freed = 0
+    emptied = 0
+    mismatch = 0
+    for row in rows:
+        r_path = row["recycle_path"] if "recycle_path" in row.keys() else None
+        i_path = row["recycle_info_name"] if "recycle_info_name" in row.keys() else None
+        status = row["status"]
+        if not r_path or status not in ("DONE",):
+            continue
+        # 定位同目录下的 $I 文件（$Rxxx → $Ixxx）
+        rp = Path(r_path)
+        i_file = rp.parent / ("$I" + rp.name[2:])
+        if not i_file.exists():
+            mismatch += 1
+            continue
+        try:
+            info = parse_i_file(i_file.read_bytes())
+        except OSError:
+            mismatch += 1
+            continue
+        # 校验：$I 记录的原始路径与日志 source_path 一致（大小写不敏感）
+        if info is None or _norm(info["original_path"]) != _norm(row["source_path"]):
+            mismatch += 1
+            continue
+        # 永久删除 $R 与 $I（$R 可能是文件或目录，且可能带只读属性）
+        try:
+            size = rp.stat().st_size if rp.exists() else (row["file_size"] or 0)
+            if rp.is_dir():
+                # 目录型条目：清空只读属性后整树删除
+                def _onchmod(fn, _path, _err):
+                    try:
+                        os.chmod(_path, stat.S_IWRITE)
+                        os.remove(_path)
+                    except OSError:
+                        pass
+                shutil.rmtree(rp, onerror=_onchmod)
+            elif rp.exists():
+                try:
+                    os.chmod(rp, stat.S_IWRITE)
+                except OSError:
+                    pass
+                os.remove(rp)
+            try:
+                os.chmod(i_file, stat.S_IWRITE)
+            except OSError:
+                pass
+            os.remove(i_file)
+            freed += size
+            emptied += 1
+            undo.update_entry(row["id"], status="EMPTIED")
+        except OSError as e:
+            logger.warning("回收站条目删除失败: %s: %s", r_path, e)
+            mismatch += 1
+    return {"status": "completed", "op_uuid": op_uuid, "freed_bytes": freed,
+            "emptied": emptied, "mismatch": mismatch,
+            "message": "已永久删除的条目不可撤销"}
 
 
 class FileOperator:

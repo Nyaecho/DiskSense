@@ -15,6 +15,21 @@
 #   locations.<role>.size_mb / file_count / has_exe   role ∈ program_base|user_data|cache|logs
 #   total_size_mb / last_access_days / location_anomaly
 
+# 常见缓存目录模式库（cache-detection 能力）：扫描时对目录名做
+# fnmatch 匹配（大小写不敏感），命中即在节点打 CACHE_DOMINANT:<type> 信号，
+# 聚合时归入缓存桶而非「未归类文件」。可自行追加 pattern/type 条目。
+cache_dir_patterns:
+  - {pattern: ".pnpm-store", type: pnpm}
+  - {pattern: ".yarn", type: yarn}
+  - {pattern: ".cache", type: generic-cache}
+  - {pattern: "pip", type: pip}
+  - {pattern: "conda-meta", type: conda}
+  - {pattern: "pkgs", type: conda}
+  - {pattern: ".conda", type: conda}
+  - {pattern: "huggingface", type: huggingface}
+  - {pattern: ".cache/huggingface", type: huggingface}
+  - {pattern: "torch", type: torch}
+
 rules:
   - signal: CACHE_DOMINANT
     description: 缓存体积超过（主程序+用户数据）之和的 1.5 倍，且缓存本身超过 200MB

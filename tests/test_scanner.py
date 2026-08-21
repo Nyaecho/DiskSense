@@ -59,6 +59,49 @@ def test_walk_ignore_globs(tmp_path):
     assert "keep" not in result.root.children
 
 
+def test_cache_pattern_recognition(tmp_path):
+    """命中缓存模式库的目录节点应携带 cache_type 标注。"""
+    from disk_sense.scanner import load_cache_dir_patterns, match_cache_pattern, scan_via_walk
+
+    (tmp_path / ".pnpm-store" / "v10").mkdir(parents=True)
+    (tmp_path / ".pnpm-store" / "v10" / "pkg.tgz").write_bytes(b"x" * 100)
+    (tmp_path / "huggingface").mkdir()
+    (tmp_path / "huggingface" / "model.bin").write_bytes(b"y" * 50)
+    (tmp_path / "normal_dir").mkdir()
+    (tmp_path / "normal_dir" / "a.txt").write_bytes(b"z")
+
+    result = scan_via_walk(str(tmp_path))
+
+    def find(name):
+        for n in (result.root.children or {}).values():
+            if n.name == name:
+                return n
+        return None
+
+    pnpm = find(".pnpm-store")
+    assert pnpm is not None and pnpm.cache_type == "pnpm"
+    hf = find("huggingface")
+    assert hf is not None and hf.cache_type == "huggingface"
+    normal = find("normal_dir")
+    assert normal is not None and normal.cache_type is None
+
+
+def test_match_cache_pattern():
+    from disk_sense.scanner import match_cache_pattern
+
+    patterns = [(".pnpm-store", "pnpm"), ("pkgs", "conda")]
+    assert match_cache_pattern(".PNPM-STORE", patterns) == "pnpm"
+    assert match_cache_pattern("pkgs", patterns) == "conda"
+    assert match_cache_pattern("other", patterns) is None
+    assert match_cache_pattern("other", []) is None
+
+
+def test_load_cache_dir_patterns_missing(tmp_path):
+    from disk_sense.scanner import load_cache_dir_patterns
+
+    assert load_cache_dir_patterns(tmp_path / "nonexistent.yaml") == []
+
+
 def test_walk_default_ignores(tmp_path):
     (tmp_path / "$RECYCLE.BIN").mkdir()
     (tmp_path / "$RECYCLE.BIN" / "junk").write_bytes(b"x" * 100)

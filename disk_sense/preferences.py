@@ -28,6 +28,7 @@ DEFAULT_PREFS: dict[str, Any] = {
     "protected_paths": [],
     "tags": {},
     "ignore_patterns": [],
+    "pseudo_entity_paths": [],
     "auto_clean_rules": {
         "temp": {"max_age_days": 30, "enabled": True},
         "logs": {"max_age_days": 90, "enabled": False},
@@ -164,3 +165,28 @@ class Preferences:
         with self._lock:
             rule = self._data["auto_clean_rules"].get(kind)
             return dict(rule) if rule else None
+
+    # ------------------------------------------------------------------
+    # 伪实体标记路径（pseudo-entities）
+    # ------------------------------------------------------------------
+    @property
+    def pseudo_entity_paths(self) -> list[str]:
+        with self._lock:
+            return list(self._data.get("pseudo_entity_paths", []))
+
+    def add_pseudo_entity_path(self, path: str) -> dict:
+        with self._lock:
+            paths = self._data.setdefault("pseudo_entity_paths", [])
+            if _norm(path) not in [_norm(p) for p in paths]:
+                paths.append(path)
+                self.save()
+        return {"status": "added", "path": path}
+
+    def remove_pseudo_entity_path(self, path: str) -> dict:
+        with self._lock:
+            want = _norm(path)
+            self._data["pseudo_entity_paths"] = [
+                p for p in self._data.get("pseudo_entity_paths", []) if _norm(p) != want
+            ]
+            self.save()
+        return {"status": "removed", "path": path}
