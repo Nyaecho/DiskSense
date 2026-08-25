@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [node-main, main]
+    branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
