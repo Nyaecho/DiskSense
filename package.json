@@ -1,9 +1,26 @@
 {
   "name": "disk-sense",
-  "version": "2.0.0-alpha.1",
+  "version": "1.0.0",
   "description": "DiskSense 便携式 AI 磁盘文件管理器（Agent Skill CLI）",
   "license": "MIT",
   "author": "Nyaecho",
+  "homepage": "https://github.com/Nyaecho/DiskSense#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nyaecho/DiskSense.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Nyaecho/DiskSense/issues"
+  },
+  "keywords": [
+    "disk",
+    "storage",
+    "cleanup",
+    "recycle-bin",
+    "agent-skill",
+    "cli",
+    "windows"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22.12"
