@@ -1,9 +1,14 @@
+#!/usr/bin/env node
 /**
  * DiskSense CLI 主入口（无 daemon 架构）。
  *
  * 所有工具命令把结果 JSON 打印到 stdout，供 Agent 读取后继续推理。
  * 命令与参数风格对齐 Python 版 api_client.py，Agent 契约不变；
  * 差异：无后台服务，「会话」持久化于磁盘并带 op_count 新鲜度账本。
+ *
+ * 首行 shebang（#!/usr/bin/env node）经 tsc 原样保留，npm 据此生成
+ * 「node 调用」的 bin shim，而非直接执行 .js（否则会走 Windows 的
+ * .js 文件关联，被 Electron 等应用劫持）。
  */
 
 import { Command } from "commander";
@@ -45,7 +50,21 @@ import { dirStat, pathSize, searchDirs } from "./fsutils.js";
 import { registerWorkerCommand } from "./worker.js";
 
 const program = new Command();
-program.name("disk-sense").description("DiskSense 便携式 AI 磁盘文件管理器").version("2.0.0-alpha.1");
+program
+  .name("disk-sense")
+  .description("DiskSense 便携式 AI 磁盘文件管理器")
+  .version(cliVersion());
+
+/** 从随包分发的 package.json 读取版本（避免与 npm 版本脱节）。 */
+function cliVersion(): string {
+  try {
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 输出约定
@@ -653,7 +672,7 @@ program
 registerWorkerCommand(program);
 
 // 仅作为主模块运行时才解析 argv（允许测试/工具安全导入本模块）
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 const invokedDirectly =
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
