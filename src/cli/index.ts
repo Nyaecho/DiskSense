@@ -44,7 +44,7 @@ import {
   treeToJSON,
   treeFromJSON,
 } from "../state/session.js";
-import { appendOverlay, queryOverlays } from "../state/overlays.js";
+import { appendOverlay, queryOverlays, clearOverlays } from "../state/overlays.js";
 import { buildSubtree, findNode, queryDetail, sessionMeta } from "./session-query.js";
 import { dirStat, pathSize, searchDirs } from "./fsutils.js";
 import { registerWorkerCommand } from "./worker.js";
@@ -399,7 +399,6 @@ program
     if (target === undefined && opts.action !== "clear") fail("--target 必填（clear 除外）");
     const payload = parseJson(opts.payload, "--payload");
     if (opts.action === "clear") {
-      const { clearOverlays } = require("../state/overlays.js");
       clearOverlays();
     }
     out(appendOverlay(opts.action, target ?? null, payload));
@@ -672,10 +671,21 @@ program
 registerWorkerCommand(program);
 
 // 仅作为主模块运行时才解析 argv（允许测试/工具安全导入本模块）
-import { pathToFileURL, fileURLToPath } from "node:url";
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+import { fileURLToPath } from "node:url";
+function isMainModule(): boolean {
+  if (process.argv[1] === undefined) return false;
+  try {
+    // realpath 解析 Junction/符号链接：全局安装的 bin 可能经 Junction 指向源码目录，
+    // 直接 path.resolve 无法解析 Junction，会导致 import.meta.url 与 argv[1] 不相等。
+    return (
+      fs.realpathSync(fileURLToPath(import.meta.url)) ===
+      fs.realpathSync(process.argv[1])
+    );
+  } catch {
+    return false;
+  }
+}
+const invokedDirectly = isMainModule();
 if (invokedDirectly) {
   program.parseAsync(process.argv).catch((e) => {
     fail(e instanceof Error ? e.message : String(e));
