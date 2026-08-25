@@ -6,7 +6,7 @@
 融合 **Everything 的检索速度 + SpaceSniffer 的可视化 + 文件管理器的操作能力 + LLM 的语义推理**。
 
 - 开发规范：[CONTRIBUTING.md](CONTRIBUTING.md)
-- 环境：Windows 10/11 · Node.js ≥ 20
+- 环境：Windows 10/11 · Node.js ≥ 22
 
 ---
 

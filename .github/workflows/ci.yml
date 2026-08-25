@@ -10,13 +10,13 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        node: [20, 22, 24]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # 锁定 better-sqlite3@12 / koffi@~3.1.5：均有 node20-24 预编译，无需 VS 工具链
+      # better-sqlite3@13 / koffi@3.1.6 均有 node22+ 预编译，无需 VS 工具链
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
