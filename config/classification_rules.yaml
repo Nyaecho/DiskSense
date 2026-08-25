@@ -29,6 +29,14 @@ cache_dir_patterns:
   - {pattern: "huggingface", type: huggingface}
   - {pattern: ".cache/huggingface", type: huggingface}
   - {pattern: "torch", type: torch}
+  # npm 生态
+  - {pattern: "npm-cache", type: npm}
+  - {pattern: "_cacache", type: npm}
+  - {pattern: ".npm", type: npm}
+  # 开发者可重建产物（依赖目录 / 虚拟环境），配合 STALE_DEV_CACHE / ORPHAN_NODE_MODULES 信号
+  - {pattern: "node_modules", type: node_modules}
+  - {pattern: ".venv", type: python-venv}
+  - {pattern: "venv", type: python-venv}
 
 rules:
   - signal: CACHE_DOMINANT

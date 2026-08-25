@@ -10,18 +10,13 @@ import fs from "node:fs";
 import path from "node:path";
 import koffi from "koffi";
 import { load as yamlLoad } from "js-yaml";
-import { rulesFile, type ScanConfig } from "../config.js";
+import { normalizeTarget, rulesFile, type ScanConfig } from "../config.js";
 import type { ProgressCallback, ScanResult, TreeNode } from "../types.js";
 import { extractDriveLetter, MftUnavailableError, scanViaMft } from "./mft.js";
 import { scanViaWalk, matchCachePattern } from "./walk.js";
 
 /** GetDriveTypeW: DRIVE_FIXED 本地硬盘 */
 const DRIVE_FIXED = 3;
-
-// Windows 重解析标记：挂载点与符号链接均不下钻，
-// 防止 C:\Documents and Settings → C:\Users 一类的死循环
-const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
-const IO_REPARSE_TAG_SYMLINK = 0xa000000c;
 
 export {
   matchCachePattern,
@@ -69,13 +64,6 @@ export function getDriveType(target: string): number {
   const letter = extractDriveLetter(target);
   if (!letter || process.platform !== "win32") return 0;
   return GetDriveTypeW(`${letter}:\\`);
-}
-
-/** 裸盘符归一化："C:" / "c:/" → "C:\"。 */
-function normalizeTarget(target: string): string {
-  const m = /^([A-Za-z]):[\\/]*$/.exec(target.trim());
-  if (m) return `${m[1]!.toUpperCase()}:\\`;
-  return target;
 }
 
 /**

@@ -101,6 +101,8 @@ export interface OpResultEntry {
   status: "done" | "failed";
   dest?: string;
   recycle_bin_name?: string | null;
+  /** 删除成功时：该条目释放的字节数（与 empty_recycle_bin 口径一致） */
+  freed_bytes?: number;
   error?: string;
 }
 
@@ -109,6 +111,8 @@ export interface OperationResult {
   status: "completed" | "failed";
   error?: string;
   results: OpResultEntry[];
+  /** 全部成功条目累计释放字节数（delete 操作） */
+  freed_bytes?: number;
 }
 
 export class FileOperator {
@@ -158,8 +162,10 @@ export class FileOperator {
     if (missing.length > 0) throw new FileOperatorError(`源路径不存在: ${missing[0]}`);
 
     const opUuid = randomUUID();
+    const sizes = new Map<string, number>();
     const entries = sources.map((s) => {
       const [size, mtime] = FileOperator.statOf(s);
+      if (size !== null) sizes.set(s, size);
       return this.entry(s, undefined, size, mtime);
     });
     const ids = this.undo.logBatch(opUuid, "DELETE", entries, this.sessionId);
@@ -222,10 +228,16 @@ export class FileOperator {
           source: s,
           status: "done",
           recycle_bin_name: (fields.recycle_bin_name as string) ?? null,
+          freed_bytes: sizes.get(s) ?? 0,
         });
       }
     });
-    return { op_uuid: opUuid, status: "completed", results };
+    return {
+      op_uuid: opUuid,
+      status: "completed",
+      freed_bytes: results.reduce((acc, r) => acc + (r.freed_bytes ?? 0), 0),
+      results,
+    };
   }
 
   /** move/copy 共用传输流程。 */

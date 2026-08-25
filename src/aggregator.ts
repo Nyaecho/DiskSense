@@ -127,7 +127,25 @@ export interface CacheDirHit {
   size: number;
   mtime: number;
   cache_type: string;
+  /** 开发者产物附加信号（STALE_DEV_CACHE / ORPHAN_NODE_MODULES），可空 */
+  signals?: string[];
 }
+
+/** 视为「可重建开发产物」的缓存类型。 */
+const DEV_CACHE_TYPES = new Set(["node_modules", "python-venv"]);
+/** 开发产物过期阈值（天）：超过即打 STALE_DEV_CACHE。 */
+const DEV_STALE_DAYS = 90;
+/** 判定 node_modules 是否「孤立」的清单/锁文件名（小写）。 */
+const JS_MANIFESTS = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "bun.lockb",
+]);
+/** 常见源码目录/入口，作为「项目仍存活」的辅助证据。 */
+const SOURCE_MARKERS = new Set(["src", "lib", "app", "index.js", "index.ts", "tsconfig.json"]);
 
 /** 把 ScanResult 树聚合成指纹档案。 */
 export class Aggregator {
@@ -220,6 +238,7 @@ export class Aggregator {
           size_mb: mb(c.size),
           mtime: c.mtime,
           signal: `CACHE_DOMINANT:${c.cache_type}`,
+          ...(c.signals && c.signals.length > 0 ? { signals: c.signals } : {}),
         })),
       summary: {
         total_scanned_mb: mb(result.totalBytes),
@@ -233,7 +252,11 @@ export class Aggregator {
         entities_truncated: truncated,
         cache_dirs_count: this.cacheDirs.length,
       },
-      signals_legend: Object.fromEntries(this.rules.rules.map((r) => [r.signal, r.description])),
+      signals_legend: {
+        ...Object.fromEntries(this.rules.rules.map((r) => [r.signal, r.description])),
+        STALE_DEV_CACHE: `node_modules/venv 等开发产物超过 ${DEV_STALE_DAYS} 天未访问，可删除后按需重建`,
+        ORPHAN_NODE_MODULES: "node_modules 同级无 package.json/lockfile/源码标记，疑似源码已删的孤立依赖目录",
+      },
       treemap: this.buildTreemap(root, ordered),
     };
     if (pseudoGenerated) fingerprint["pseudo_entities"] = true;
@@ -445,13 +468,16 @@ export class Aggregator {
 
       // 缓存目录模式库命中：整棵子树归入缓存桶，不再下钻归类
       if (child.isDir && child.cacheType) {
-        this.cacheDirs.push({
+        const hit: CacheDirHit = {
           name,
           path: filePath,
           size: child.size,
           mtime: child.mtime,
           cache_type: child.cacheType,
-        });
+        };
+        const sigs = this.devArtifactSignals(child, node);
+        if (sigs.length > 0) hit.signals = sigs;
+        this.cacheDirs.push(hit);
         continue;
       }
 
@@ -503,6 +529,40 @@ export class Aggregator {
         }
       }
     }
+  }
+
+  // ------------------------------------------------------------------
+  /**
+   * 开发者产物信号（面向数据盘的依赖/虚拟环境目录）：
+   * - STALE_DEV_CACHE：node_modules / venv 超过 90 天未访问，可安全重建；
+   * - ORPHAN_NODE_MODULES：同级无 package.json / lockfile / 源码标记，
+   *   极大概率是源码已删、残留依赖目录。
+   */
+  private devArtifactSignals(node: TreeNode, parent: TreeNode): string[] {
+    const type = node.cacheType;
+    if (!type || !DEV_CACHE_TYPES.has(type)) return [];
+    const sigs: string[] = [];
+
+    // 目录 atime 会被任何遍历（scan/search_dirs）刷新，不可作为活跃依据；
+    // mtime 只在内容变更（如 npm install）时更新，对目录语义正确
+    const lastActive = node.mtime;
+    if (lastActive > 0) {
+      const days = Math.floor((this.now - lastActive) / 86400);
+      if (days > DEV_STALE_DAYS) sigs.push("STALE_DEV_CACHE");
+    }
+
+    if (type === "node_modules") {
+      let hasManifest = false;
+      for (const name of parent.children?.keys() ?? []) {
+        const low = name.toLowerCase();
+        if (JS_MANIFESTS.has(low) || SOURCE_MARKERS.has(low)) {
+          hasManifest = true;
+          break;
+        }
+      }
+      if (!hasManifest) sigs.push("ORPHAN_NODE_MODULES");
+    }
+    return sigs;
   }
 
   // ------------------------------------------------------------------

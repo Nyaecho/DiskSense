@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { sessionsDir } from "../config.js";
+import { normalizeTarget, sessionsDir } from "../config.js";
 import type { ScanResult, TreeNode } from "../types.js";
 import { lockSync, unlockSync } from "proper-lockfile";
 
@@ -108,8 +108,14 @@ export function treeFromJSON(json: TreeNodeJSON): TreeNode {
 
 /** 会话文件路径：按扫描根路径的哈希定位。 */
 export function sessionFileForRoot(rootPath: string): string {
-  const h = crypto.createHash("sha1").update(path.resolve(rootPath).toLowerCase()).digest("hex").slice(0, 12);
+  // 先归一化裸盘符再 resolve：path.resolve("D:") 会锚到 D 盘当前工作目录
+  const key = resolveTargetKey(rootPath);
+  const h = crypto.createHash("sha1").update(key).digest("hex").slice(0, 12);
   return path.join(sessionsDir(), `${h}.json`);
+}
+
+function resolveTargetKey(p: string): string {
+  return path.resolve(normalizeTarget(p)).toLowerCase();
 }
 
 function atomicWriteJson(file: string, obj: unknown): void {
@@ -130,7 +136,7 @@ export function saveSession(
 ): StoredSession {
   const session: StoredSession = {
     session_id: sessionId,
-    root_path: path.resolve(rootPath),
+    root_path: path.resolve(normalizeTarget(rootPath)),
     mode: result.mode,
     scanned_at: Date.now() / 1000,
     op_count: 0,

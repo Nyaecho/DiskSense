@@ -17,6 +17,24 @@ import { load as yamlLoad } from "js-yaml";
 // ---------------------------------------------------------------------------
 // 路径常量
 // ---------------------------------------------------------------------------
+/**
+ * 裸盘符归一化："C:" / "c:/" → "C:\"。
+ *
+ * 必须在 path.resolve 之前调用：Windows 上 path.resolve("D:") 会解析为
+ * D 盘的当前工作目录（而非 "D:\"），直接 resolve 会导致会话 root_path、
+ * 会话文件哈希等全部锚到错误目录。
+ */
+export function normalizeTarget(target: string): string {
+  const m = /^([A-Za-z]):[\\/]*$/.exec(target.trim());
+  if (m) return `${m[1]!.toUpperCase()}:\\`;
+  return target;
+}
+
+/** 先归一化裸盘符再取绝对路径（所有持久化路径入口统一走这里）。 */
+export function resolveTarget(target: string): string {
+  return path.resolve(normalizeTarget(target));
+}
+
 export function dataHome(): string {
   const override = process.env["DISK_SENSE_HOME"];
   if (override) return path.resolve(override);
@@ -75,12 +93,6 @@ export function ensureDataDirs(): void {
 // ---------------------------------------------------------------------------
 // 配置结构（字段默认值即文档）
 // ---------------------------------------------------------------------------
-export interface ServerConfig {
-  host: string;
-  /** 兼容保留：Python 版监听端口；CLI 无服务时仅作默认 job/会话命名空间 */
-  port: number;
-}
-
 export interface ScanConfig {
   useMft: boolean;
   /** null = max(1, CPU-2) */
@@ -90,18 +102,12 @@ export interface ScanConfig {
   defaultDirIgnores: string[];
 }
 
-export interface ScanApiConfig {
-  syncTimeoutSec: number;
-}
-
 export interface HistoryConfig {
   retentionDays: number;
 }
 
 export interface Config {
-  server: ServerConfig;
   scan: ScanConfig;
-  scanApi: ScanApiConfig;
   history: HistoryConfig;
 }
 
@@ -131,7 +137,6 @@ export function loadConfig(filePath?: string): Config {
   };
 
   return {
-    server: pick("server", { host: "127.0.0.1", port: 58901 }),
     scan: pick("scan", {
       useMft: true,
       maxWorkers: null,
@@ -139,7 +144,6 @@ export function loadConfig(filePath?: string): Config {
       throttleSleepMs: 1,
       defaultDirIgnores: [...DEFAULT_DIR_IGNORES],
     }),
-    scanApi: pick("scan_api", { syncTimeoutSec: 120 }),
     history: pick("history", { retentionDays: 30 }),
   };
 }

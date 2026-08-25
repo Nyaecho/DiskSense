@@ -25,8 +25,10 @@ export function sessionMeta(session: StoredSession): SessionMeta {
 
 /** 在存储树中按绝对路径定位节点（大小写不敏感）。 */
 export function findNode(session: StoredSession, targetPath: string): TreeNodeJSON | null {
-  const rootLow = session.root_path.toLowerCase();
-  const rel = path_norm(targetPath).toLowerCase();
+  // 裸盘符根的 root_path 形如 "D:\"（带尾分隔符），必须先去掉再拼前缀，
+  // 否则 rootLow + "\\" 产生 "d:\\" 导致前缀匹配恒失败
+  const rootLow = session.root_path.toLowerCase().replace(/[\\/]+$/, "");
+  const rel = path_norm(targetPath).toLowerCase().replace(/[\\/]+$/, "");
   let node: TreeNodeJSON = session.tree;
   if (rel === rootLow) return node;
   if (!rel.startsWith(rootLow + "\\")) return null;

@@ -156,7 +156,11 @@ describe("aggregate 整体行为", () => {
 
     expect(fp.summary.scan_mode).toBe("walk");
     expect(fp.summary.entities_count).toBe(fp.entities.length);
-    expect(Object.keys(fp.signals_legend).length).toBe(0); // 空规则引擎
+    // 空规则引擎 → 图例只含内置的开发者产物信号
+    expect(Object.keys(fp.signals_legend).sort()).toEqual([
+      "ORPHAN_NODE_MODULES",
+      "STALE_DEV_CACHE",
+    ]);
 
     expect(fp.treemap.id).toBe("root");
     expect(fp.treemap.children.some((c: any) => c.id === "unassigned")).toBe(true);

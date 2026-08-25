@@ -97,14 +97,31 @@ export interface SearchResult {
 }
 
 /**
+ * 已知「重目录」：其子树体量通常巨大且内容自包含（依赖/版本库/编译缓存）。
+ * 命中后仍参与模式匹配（可被搜到），但默认不再向下遍历以加速全盘搜索。
+ */
+const HEAVY_DIR_NAMES = new Set([
+  "node_modules",
+  ".git",
+  ".svn",
+  ".hg",
+  "__pycache__",
+  "_cacache",
+  ".pnpm-store",
+  "$recycle.bin",
+]);
+
+/**
  * fnmatch 通配递归搜索目录**与**文件名（大小写不敏感）。
  * 命中用户忽略模式的目录不匹配也不下钻；各按大小降序 Top N。
+ * @param skipHeavy 命中已知重目录时不再下钻（目录本身仍会被匹配统计）
  */
 export function searchDirs(
   pattern: string,
   root: string,
   top = 50,
-  ignorePatterns: readonly string[] = []
+  ignorePatterns: readonly string[] = [],
+  skipHeavy = false
 ): SearchResult {
   const result: SearchResult = {
     dirs: [],
@@ -129,8 +146,9 @@ export function searchDirs(
     for (const e of entries) {
       if (e.isSymbolicLink()) continue;
       if (e.isDirectory()) {
+        const matched = fnmatch(e.name.toLowerCase(), pattern.toLowerCase());
         if (!ignored(e.name)) {
-          if (fnmatch(e.name.toLowerCase(), pattern.toLowerCase())) {
+          if (matched) {
             result.total_dirs_matched++;
             try {
               const st = fs.statSync(path.join(dir, e.name));
@@ -143,7 +161,10 @@ export function searchDirs(
               /* 忽略统计失败的条目 */
             }
           }
-          stack.push(path.join(dir, e.name));
+          // 重目录：自身可被搜到，但其子树不再下钻
+          if (!(skipHeavy && HEAVY_DIR_NAMES.has(e.name.toLowerCase()))) {
+            stack.push(path.join(dir, e.name));
+          }
         }
       } else {
         if (fnmatch(e.name.toLowerCase(), pattern.toLowerCase())) {

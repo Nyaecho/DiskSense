@@ -18,7 +18,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
-import { ensureDataDirs, loadConfig, dataHome, rulesFile } from "../config.js";
+import { ensureDataDirs, loadConfig, dataHome, normalizeTarget, rulesFile } from "../config.js";
 import { elevateAndWait, isAdmin, ElevateCancelled } from "../elevate.js";
 import { Preferences } from "../preferences.js";
 import { classifyMagicNumber } from "../magic.js";
@@ -155,7 +155,7 @@ function finishScan(drive: string, result: Awaited<ReturnType<typeof scan>>): Re
 /** 是否值得为该扫描目标请求 UAC 提权（本地固定盘 + 当前非管理员）。 */
 export function shouldElevateFor(drivePath: string): boolean {
   if (process.platform !== "win32") return false;
-  const bareDrive = /^[A-Za-z]:[\\/]?$/.exec(path.resolve(drivePath));
+  const bareDrive = /^[A-Za-z]:[\\/]?$/.exec(normalizeTarget(drivePath));
   if (!bareDrive) return false;
   try {
     if (getDriveType(drivePath) !== 3) return false; // 仅 DRIVE_FIXED
@@ -280,9 +280,18 @@ program
   .requiredOption("--pattern <pattern>")
   .requiredOption("--root <path>")
   .option("--top <n>", "按大小降序取前 N", "50")
+  .option("--skip-heavy", "命中 node_modules/.git 等已知重目录时不再向下遍历（加速全盘搜索）")
   .action((opts) => {
     try {
-      out(searchDirs(opts.pattern, opts.root, Number(opts.top), prefsInstance().ignorePatterns));
+      out(
+        searchDirs(
+          opts.pattern,
+          opts.root,
+          Number(opts.top),
+          prefsInstance().ignorePatterns,
+          Boolean(opts.skipHeavy)
+        )
+      );
     } catch (e) {
       fail(e instanceof Error ? e.message : String(e));
     }
@@ -322,7 +331,7 @@ program
     ensureDataDirs();
     const s = opts.session ? loadSessionById(opts.session) : loadLatestSession();
     if (!s) fail("无可用扫描会话，请先执行 start_scan");
-    const abs = path.resolve(opts.path);
+    const abs = path.resolve(normalizeTarget(opts.path));
     const rootLow = s.root_path.toLowerCase();
     if (!abs.toLowerCase().startsWith(rootLow)) {
       fail(`路径不在会话扫描根 ${s.root_path} 之内`);
@@ -419,9 +428,12 @@ interface ExecOpts {
   op_type: string;
   sources: string;
   dest?: string;
-  async_mode?: boolean;
+  /** commander 将 --async 映射为 camelCase 的 async */
+  async?: boolean;
   wait?: boolean;
   strict?: boolean;
+  /** commander 将 --dry-run 映射为 camelCase 的 dryRun */
+  dryRun?: boolean;
   session?: string;
 }
 
@@ -472,6 +484,31 @@ async function executeOperationHandler(opts: ExecOpts): Promise<void> {
     }
   }
 
+  // ---- 预演模式：预检 + 体积预估，不执行任何操作 ----
+  if (opts.dryRun) {
+    const items = sources.map((s) => {
+      let bytes = 0;
+      try {
+        const st = fs.statSync(s);
+        bytes = st.isDirectory() ? pathSize(s).total_bytes : Number(st.size);
+      } catch {
+        /* 预检已报告缺失项 */
+      }
+      return { source: s, exists: fs.existsSync(s), bytes };
+    });
+    out({
+      status: "dry_run",
+      op_type: opts.op_type,
+      dest: opts.dest ?? null,
+      items,
+      total_bytes: items.reduce((acc, it) => acc + it.bytes, 0),
+      note:
+        "预演模式：未执行任何操作。delete 场景 total_bytes 即预计可释放空间" +
+        "（删除走回收站，清空回收站后才真正释放）。",
+    });
+    return;
+  }
+
   const runOp = (): Record<string, unknown> => {
     const undo = undoInstance();
     try {
@@ -498,7 +535,7 @@ async function executeOperationHandler(opts: ExecOpts): Promise<void> {
   };
 
   // ---- 异步模式：spawn detached worker ----
-  if (opts.async_mode) {
+  if (opts.async) {
     const store = new JobStore();
     const job = store.create(
       opts.op_type,
@@ -531,9 +568,10 @@ program
   .option("--async", "大体积操作异步模式（立即返回 job_id）")
   .option("--wait", "配合 --async：轮询直到结束")
   .option("--strict", "严格预检：mtime 不一致即拒绝")
+  .option("--dry-run", "预演：只做预检与体积预估，不执行任何操作")
   .option("--session <id>")
   .action(async (opts) => {
-    if (opts.async_mode && opts.wait) {
+    if (opts.async && opts.wait) {
       const store = new JobStore();
       const job = store.create(opts.op_type, JSON.parse(opts.sources), opts.dest);
       const entry = process.argv[1]!;

@@ -13,6 +13,7 @@ import {
   treeFromJSON,
   type StoredSession,
 } from "../src/state/session.js";
+import { findNode } from "../src/cli/session-query.js";
 import type { ScanResult } from "../src/types.js";
 
 let home: string;
@@ -58,6 +59,20 @@ describe("会话持久化", () => {
     expect(loaded).not.toBeNull();
     expect(loaded!.session_id).toBe("sess-x");
     expect(loaded!.tree.children!["docs"]!.children!["a.txt"]!.size).toBe(500);
+  });
+
+  it("裸盘符 root_path 归一化（回归：resolve('D:') 不得锚到 cwd）", () => {
+    const s = saveSession(fakeResult("D:\\"), "D:", "sess-bare");
+    // path.resolve("D:") 在 Windows 上会解析为 D 盘当前工作目录，
+    // 持久化前必须先归一化为 "D:\"
+    expect(s.root_path.toLowerCase()).toBe("d:\\");
+    // 会话文件哈希也须基于归一化后的根，保证 loadSessionByRoot 可回查
+    expect(loadSessionByRoot("D:")).not.toBeNull();
+    expect(loadSessionByRoot("d:/")).not.toBeNull();
+    // recordOperation 用原始 "D:" 定位同一会话
+    const r = recordOperation("D:", "DELETE", ["D:\\docs\\a.txt"]);
+    expect(r).not.toBeNull();
+    expect(r!.session.session_id).toBe("sess-bare");
   });
 });
 
@@ -134,5 +149,23 @@ describe("tree 序列化往返", () => {
     expect(json.children!["docs"]!.children!["a.txt"]!.size).toBe(500);
     const node = treeFromJSON(json);
     expect(node.children!.get("docs")!.children!.get("a.txt")!.size).toBe(500);
+  });
+});
+
+describe("findNode（裸盘符根回归：root_path 带尾分隔符不得破坏前缀匹配）", () => {
+  it("裸盘符根下可定位子路径；范围外返回 null", () => {
+    const s = saveSession(fakeResult("D:\\"), "D:", "sess-find");
+    // root_path = "D:\"，旧实现 rootLow + "\\" 拼出 "d:\\" → 恒 false
+    expect(findNode(s, "D:/docs")!.name).toBe("docs");
+    expect(findNode(s, "D:\\docs\\a.txt")!.name).toBe("a.txt");
+    expect(findNode(s, "D:\\")).not.toBeNull();
+    expect(findNode(s, "E:/elsewhere")).toBeNull();
+  });
+
+  it("普通目录根行为不变", () => {
+    const s = saveSession(fakeResult("D:\\proj"), "D:\\proj", "sess-find2");
+    expect(findNode(s, "D:/proj/docs/a.txt")!.name).toBe("a.txt");
+    expect(findNode(s, "D:/proj")).not.toBeNull();
+    expect(findNode(s, "D:/other")).toBeNull();
   });
 });
