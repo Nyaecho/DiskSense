@@ -1,9 +1,18 @@
 # DiskSense
 
+[![npm version](https://img.shields.io/npm/v/disk-sense?color=cb3837&logo=npm)](https://www.npmjs.com/package/disk-sense)
+[![CI](https://github.com/Nyaecho/DiskSense/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Nyaecho/DiskSense/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/Nyaecho/DiskSense)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4?logo=windows)](https://www.npmjs.com/package/disk-sense)
+
 > 便携式 AI 磁盘文件管理器 —— 由 LLM Agent 驱动的本地磁盘语义化管理 CLI（Agent Skill 包）
 > Node/TypeScript 重写版；Python 历史版本归档于 [`python-legacy`](https://github.com/Nyaecho/DiskSense/tree/python-legacy) 分支
 
 融合 **Everything 的检索速度 + SpaceSniffer 的可视化 + 文件管理器的操作能力 + LLM 的语义推理**。
+
+```powershell
+npm install -g disk-sense
+```
 
 - 开发规范：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 环境：Windows 10/11 · Node.js ≥ 22
