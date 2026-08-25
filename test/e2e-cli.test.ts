@@ -1,10 +1,11 @@
 /** CLI 端到端冒烟测试：扫描→分析→操作→记账→撤销→rescan 全链路。 */
 
 import { describe, expect, it } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { recycleBinAvailable, SKIP_RB_MSG } from "./helpers.js";
 
 const CLI = path.resolve("src/cli/index.ts");
 
@@ -22,6 +23,7 @@ function run(args: string[], env: NodeJS.ProcessEnv): any {
 
 describe("DiskSense CLI e2e（win32）", () => {
   it("全链路：scan → detail → delete(stale 记账) → undo → rescan", () => {
+    if (!recycleBinAvailable()) return console.warn(`[skip] ${SKIP_RB_MSG}`);
     // 准备隔离环境
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ds-e2e-home-"));
     const tree = fs.mkdtempSync(path.join(os.tmpdir(), "ds-e2e-tree-"));

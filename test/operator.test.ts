@@ -7,6 +7,7 @@ import path from "node:path";
 import { UndoManager } from "../src/operator/undo-manager.js";
 import { FileOperator, executeUndo } from "../src/operator/file-operator.js";
 import { emptyRecycleBinForOp, parseIFile } from "../src/operator/recycle-bin.js";
+import { recycleBinAvailable, SKIP_RB_MSG } from "./helpers.js";
 
 let dir: string;
 let dbFile: string;
@@ -56,6 +57,7 @@ maybeWin("UndoManager", () => {
 
 maybeWin("FileOperator 删除→回收站→撤销（真实回收站往返）", () => {
   it("删除捕获精确 $R 映射，撤销物理还原", () => {
+    if (!recycleBinAvailable()) return console.warn(`[skip] ${SKIP_RB_MSG}`);
     const src = makeTree();
     const target = path.join(src, "a.txt");
     const undo = new UndoManager(dbFile);
@@ -128,6 +130,7 @@ maybeWin("FileOperator 删除→回收站→撤销（真实回收站往返）", 
   });
 
   it("受控清空：仅删指定 op 的条目且校验原始路径", { timeout: 20000 }, () => {
+    if (!recycleBinAvailable()) return console.warn(`[skip] ${SKIP_RB_MSG}`);
     const src = makeTree();
     const target = path.join(src, "a.txt");
     const undo = new UndoManager(dbFile);
