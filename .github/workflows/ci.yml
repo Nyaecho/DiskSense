@@ -16,7 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install
+      # 锁定 better-sqlite3@12 / koffi@~3.1.5：均有 node20-24 预编译，无需 VS 工具链
+      - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
@@ -33,7 +34,7 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npm install
+      - run: npm ci
       - run: npm run build
       - run: npm publish --provenance
         env:
