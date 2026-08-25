@@ -1,0 +1,114 @@
+# DiskSense 语义信号规则
+#
+# 设计哲学：代码中绝不出现硬编码的软件名判断；所有"聪明话"由 Agent 基于这些
+# 客观信号即时推理生成。本文件只定义结构化条件，由 rules_engine.SafeEvaluator
+# 安全评估（点路径取值 + 受限算子白名单，绝不使用 eval）。
+#
+# 条件节点文法：
+#   字面量     数字 / 布尔直接书写；字符串字面量用 {"value": "..."} 包裹
+#   路径引用   点号路径字符串，如 locations.cache.size_mb（相对实体字典）
+#   比较       {op: gt|lt|gte|lte|eq|ne, left: <节点>, right: <节点>}
+#   算术       {op: add|sub|mul|truediv, left: <节点>, right: <节点>, multiplier: <可选倍率>}
+#   逻辑       {and: [<节点>, ...]} / {or: [<节点>, ...]} / {not: <节点>}
+#
+# 实体字段说明（由 aggregator 输出）：
+#   locations.<role>.size_mb / file_count / has_exe   role ∈ program_base|user_data|cache|logs
+#   total_size_mb / last_access_days / location_anomaly
+
+# 常见缓存目录模式库（cache-detection 能力）：扫描时对目录名做
+# fnmatch 匹配（大小写不敏感），命中即在节点打 CACHE_DOMINANT:<type> 信号，
+# 聚合时归入缓存桶而非「未归类文件」。可自行追加 pattern/type 条目。
+cache_dir_patterns:
+  - {pattern: ".pnpm-store", type: pnpm}
+  - {pattern: ".yarn", type: yarn}
+  - {pattern: ".cache", type: generic-cache}
+  - {pattern: "pip", type: pip}
+  - {pattern: "conda-meta", type: conda}
+  - {pattern: "pkgs", type: conda}
+  - {pattern: ".conda", type: conda}
+  - {pattern: "huggingface", type: huggingface}
+  - {pattern: ".cache/huggingface", type: huggingface}
+  - {pattern: "torch", type: torch}
+
+rules:
+  - signal: CACHE_DOMINANT
+    description: 缓存体积超过（主程序+用户数据）之和的 1.5 倍，且缓存本身超过 200MB
+    condition:
+      and:
+        - op: gt
+          left: locations.cache.size_mb
+          right:
+            op: mul
+            left:
+              op: add
+              left: locations.program_base.size_mb
+              right: locations.user_data.size_mb
+            right: 1.5
+        - op: gt
+          left: locations.cache.size_mb
+          right: 200
+
+  - signal: EXE_MISSING
+    description: 安装目录存在（>10MB）却无任何 exe，极大概率是卸载残留
+    condition:
+      and:
+        - op: eq
+          left: locations.program_base.has_exe
+          right: false
+        - op: gt
+          left: locations.program_base.size_mb
+          right: 10
+
+  - signal: ORPHAN_USER_DATA
+    description: 无任何安装目录却残留超过 300MB 用户数据，典型卸载残留
+    condition:
+      and:
+        - op: eq
+          left: locations.program_base.size_mb
+          right: 0
+        - op: gt
+          left: locations.user_data.size_mb
+          right: 300
+
+  - signal: ANCIENT_DATA
+    description: 超过 180 天无访问且总体积超过 1GB，建议归档评估
+    condition:
+      and:
+        - op: gt
+          left: last_access_days
+          right: 180
+        - op: gt
+          left: total_size_mb
+          right: 1000
+
+  - signal: STALE_CACHE
+    description: 缓存超过 300MB 且超过 90 天无访问，清理收益高
+    condition:
+      and:
+        - op: gt
+          left: locations.cache.size_mb
+          right: 300
+        - op: gt
+          left: last_access_days
+          right: 90
+
+  - signal: LOG_HEAVY
+    description: 日志体积超过 500MB，通常可安全压缩或清理
+    condition:
+      op: gt
+      left: locations.logs.size_mb
+      right: 500
+
+  - signal: LOCATION_ANOMALY
+    description: 在标准目录之外发现同实体散落文件，可能存在异常占用
+    condition:
+      op: eq
+      left: location_anomaly
+      right: true
+
+  - signal: LARGE_ENTITY
+    description: 单实体总体积超过 10GB，属于磁盘占用大户
+    condition:
+      op: gt
+      left: total_size_mb
+      right: 10240

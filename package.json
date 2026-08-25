@@ -1,0 +1,49 @@
+{
+  "name": "disk-sense",
+  "version": "2.0.0-alpha.1",
+  "description": "DiskSense 便携式 AI 磁盘文件管理器（Agent Skill CLI）",
+  "license": "MIT",
+  "author": "Nyaecho",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "win32"
+  ],
+  "bin": {
+    "disk-sense": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "config",
+    "SKILL.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "better-sqlite3": "^13.0.3",
+    "commander": "^14.0.3",
+    "js-yaml": "^5.4.0",
+    "koffi": "^3.1.6",
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.10.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,21 @@
+# ---- Node ----
+node_modules/
+dist/
+*.tsbuildinfo
+
+# ---- DiskSense 运行时数据（便携原则：全部状态不入库） ----
+Data/
+sessions/
+
+# ---- 测试与工具缓存 ----
+coverage/
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp
+
+# ---- 操作系统 ----
+Thumbs.db
+desktop.ini
+.DS_Store
