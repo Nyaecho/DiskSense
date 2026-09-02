@@ -104,7 +104,17 @@ export async function scan(
       return result;
     } catch (e) {
       if (!(e instanceof MftUnavailableError)) throw e;
-      // MFT 不可用，静默降级 walk
+      // MFT 不可用，静默降级 walk（原因透传供诊断）
+      const result = await scanViaWalk(target, cachePatterns, [
+        ...(cfg?.defaultDirIgnores ?? []),
+        ...(options.ignoreGlobs ?? []),
+      ], {
+        maxWorkers: cfg?.maxWorkers ?? null,
+        progressCb: options.progressCb,
+        cancelRequested: options.cancelRequested,
+      });
+      result.mftError = e.message;
+      return result;
     }
   }
 

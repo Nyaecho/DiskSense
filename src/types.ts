@@ -55,6 +55,8 @@ export interface ScanResult {
   /** MFT 模式：父链断裂的记录数 */
   orphans: number;
   elapsedSec: number;
+  /** MFT 快速路径失败降级 walk 的原因（诊断用；仅 walk 模式可能出现） */
+  mftError?: string;
 }
 
 /** 进度回调：cb(progress∈[0,1], files_seen, bytes_seen) */

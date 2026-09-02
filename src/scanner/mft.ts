@@ -71,22 +71,38 @@ export interface VolumeData {
   mftStartLcn: number;
 }
 
-/** 解析 NTFS_VOLUME_DATA_BUFFER（FSCTL_GET_NTFS_VOLUME_DATA 输出）。 */
+/** 解析 NTFS_VOLUME_DATA_BUFFER（FSCTL_GET_NTFS_VOLUME_DATA 输出）。
+ *  权威布局（winioctl.h）：@0 起为 5 个 LARGE_INTEGER（Serial/NumberSectors/
+ *  TotalClusters/FreeClusters/TotalReserved），随后 4 个 DWORD（BytesPerSector
+ *  @40 / BytesPerCluster @44 / BytesPerFRS @48 / ClustersPerFRS @52），再 5 个
+ *  LARGE_INTEGER（MftValidDataLength @56 / MftStartLcn @64 / Mft2 @72 /
+ *  MftZoneStart @80 / MftZoneEnd @88）。
+ *  注意：Win11 实测 @44 的 BytesPerCluster 可能被存储保留信息占用而失真，
+ *  故簇大小一律由 NumberSectors×BytesPerSector/TotalClusters 推导。 */
 export function parseVolumeData(buf: Buffer): VolumeData {
-  if (buf.length < 88) throw new MftUnavailableError("卷数据缓冲区不完整");
-  const bytesPerCluster = Number(buf.readBigInt64LE(5 * 8));
-  const bytesPerFrs = Number(buf.readBigInt64LE(7 * 8));
-  const mftValidDataLength = buf.readBigInt64LE(9 * 8);
-  const mftStartLcn = buf.readBigInt64LE(10 * 8);
-  if (bytesPerCluster <= 0 || bytesPerFrs <= 0) {
+  if (buf.length < 96) throw new MftUnavailableError("卷数据缓冲区不完整");
+  const totalSectors = Number(buf.readBigInt64LE(8));
+  const totalClusters = Number(buf.readBigInt64LE(16));
+  const bytesPerSector = buf.readUInt32LE(40);
+  const bytesPerFrs = buf.readUInt32LE(48);
+  const mftValidDataLength = Number(buf.readBigInt64LE(56));
+  const mftStartLcn = Number(buf.readBigInt64LE(64));
+  const bytesPerCluster =
+    totalClusters > 0 && bytesPerSector > 0
+      ? Math.round((totalSectors * bytesPerSector) / totalClusters)
+      : 0;
+  const sanePow2 = (v: number, lo: number, hi: number): boolean =>
+    v >= lo && v <= hi && (v & (v - 1)) === 0;
+  if (!sanePow2(bytesPerCluster, 512, 2 * 1024 * 1024) || !sanePow2(bytesPerFrs, 512, 16 * 1024)) {
     throw new MftUnavailableError("非 NTFS 卷或卷数据异常");
   }
-  return {
-    bytesPerCluster,
-    bytesPerFrs,
-    mftValidDataLength: Number(mftValidDataLength),
-    mftStartLcn: Number(mftStartLcn),
-  };
+  if (mftValidDataLength < bytesPerFrs || mftStartLcn < 0) {
+    throw new MftUnavailableError("MFT 定位信息异常");
+  }
+  if (mftStartLcn * bytesPerCluster >= Number.MAX_SAFE_INTEGER) {
+    throw new MftUnavailableError("MFT 偏移超出可表示范围");
+  }
+  return { bytesPerCluster, bytesPerFrs, mftValidDataLength, mftStartLcn };
 }
 
 /** 应用 Update Sequence Array 修复，校验失败返回 null。 */
@@ -111,7 +127,8 @@ export function applyFixups(buf: Buffer): Buffer | null {
 
 /**
  * 解析单个 MFT FILE 记录（须先应用 Fixup）。
- * 记录未使用 / 损坏 / 含 $ATTRIBUTE_LIST（信息不完整）时返回 null。
+ * 记录未使用 / 损坏 / 扩展记录时返回 null；含 $ATTRIBUTE_LIST 时继续找
+ * 驻留 $FILE_NAME（大目录常见，整条丢弃会导致其子树全部成为孤儿）。
  */
 export function parseRecord(buf: Buffer): MftRecord | null {
   const flags = u16(buf, 0x16);
@@ -141,7 +158,10 @@ export function parseRecord(buf: Buffer): MftRecord | null {
     if (aType === 0xffffffff) break;
     const aLen = u32(buf, off + 4);
     if (aLen === 0 || off + aLen > end) break;
-    if (aType === ATTR_ATTRIBUTE_LIST) return null; // 属性外置，本记录信息不完整
+    if (aType === ATTR_ATTRIBUTE_LIST) {
+      off += aLen;
+      continue;
+    }
     if (aType === ATTR_REPARSE_POINT) {
       isReparse = true;
     } else if (aType === ATTR_FILE_NAME && buf[off + 8] === 0) {
@@ -186,6 +206,64 @@ export function parseRecord(buf: Buffer): MftRecord | null {
     atime: chosen.atime,
     flags: recFlags,
   };
+}
+
+/**
+ * 解析 MFT 数据运行列表（Data Runlist）为绝对 LCN 区段列表。
+ * 头字节低半字节 = 长度字节数，高半字节 = 偏移字节数；偏移为有符号、
+ * 相对上一区段累加。遇终止符(0x00)、稀疏区段(偏移长度 0)或越界即停止。
+ */
+export function parseRunlist(
+  buf: Buffer,
+  off: number
+): Array<{ startLcn: number; clusters: number }> {
+  const runs: Array<{ startLcn: number; clusters: number }> = [];
+  let lcn = 0;
+  let p = off;
+  while (p < buf.length) {
+    const hdr = buf[p]!;
+    if (hdr === 0) break;
+    const lenLen = hdr & 0x0f;
+    const offLen = hdr >> 4;
+    if (lenLen === 0 || offLen === 0 || p + 1 + lenLen + offLen > buf.length) break;
+    let clusters = 0;
+    for (let i = 0; i < lenLen; i++) clusters += buf[p + 1 + i]! * 2 ** (8 * i);
+    let rel = 0n;
+    for (let i = 0; i < offLen; i++) {
+      rel += BigInt(buf[p + 1 + lenLen + i]!) << BigInt(8 * i);
+    }
+    const signBit = 1n << BigInt(8 * offLen - 1);
+    if (rel >= signBit) rel -= 1n << BigInt(8 * offLen);
+    lcn += Number(rel);
+    runs.push({ startLcn: lcn, clusters });
+    p += 1 + lenLen + offLen;
+  }
+  return runs;
+}
+
+/** 从已修复的 $MFT 记录 0 提取 $DATA 非驻留 runlist（失败返回 null）。 */
+export function extractMftRuns(
+  rec: Buffer
+): Array<{ startLcn: number; clusters: number }> | null {
+  if (rec.length < 0x30 || rec.subarray(0, 4).toString("latin1") !== "FILE") return null;
+  const attrsOff = u16(rec, 0x14);
+  const end = Math.min(u32(rec, 0x18), rec.length);
+  if (attrsOff < 0x30 || attrsOff >= end) return null;
+  let off = attrsOff;
+  while (off + 16 <= end) {
+    const aType = u32(rec, off);
+    if (aType === 0xffffffff) break;
+    const aLen = u32(rec, off + 4);
+    if (aLen === 0 || off + aLen > end) break;
+    if (aType === 0x80 && rec[off + 8] !== 0) {
+      const runOff = u16(rec, off + 0x20);
+      const runs = parseRunlist(rec, off + runOff);
+      if (runs.length > 0) return runs;
+      return null;
+    }
+    off += aLen;
+  }
+  return null;
 }
 
 /**
@@ -421,26 +499,57 @@ export function scanViaMft(
 
     const chunkRecords = Math.max(1, Math.floor((1 << 20) / recordSize));
     const chunkSize = chunkRecords * recordSize;
+
+    // 多区段 MFT：顺序读 mftStartLcn 只覆盖首个连续区段，越界后读到的是
+    // 其他文件数据。解析记录 0 的 $DATA runlist 按区段跳读（失败回退顺序读）。
+    let runs: Array<{ startLcn: number; clusters: number }> | null = null;
+    try {
+      const rec0raw = readAt(handle, mftOffset, recordSize);
+      if (rec0raw.length === recordSize) {
+        const rec0 = applyFixups(rec0raw);
+        if (rec0) runs = extractMftRuns(rec0);
+      }
+    } catch {
+      runs = null;
+    }
+    const spans: Array<{ disk: number; len: number }> = [];
+    if (runs) {
+      let v = 0;
+      for (const r of runs) {
+        if (v >= totalLen) break;
+        const len = Math.min(r.clusters * vol.bytesPerCluster, totalLen - v);
+        spans.push({ disk: r.startLcn * vol.bytesPerCluster, len });
+        v += len;
+      }
+    }
+    if (spans.length === 0) spans.push({ disk: mftOffset, len: totalLen });
+
     let filesSeen = 0;
     let bytesSeen = 0;
     let read = 0;
-    while (read < totalLen) {
-      if (options.cancelRequested?.()) {
-        throw new MftUnavailableError("扫描被取消");
+    for (const span of spans) {
+      let done = 0;
+      while (done < span.len) {
+        if (options.cancelRequested?.()) {
+          throw new MftUnavailableError("扫描被取消");
+        }
+        const toRead = Math.min(chunkSize, span.len - done);
+        const data = readAt(handle, span.disk + done, toRead);
+        if (data.length === 0) break;
+        const [n, sz] = parseMftBuffer(data, recordSize, records, Math.floor(read / recordSize));
+        filesSeen += n;
+        bytesSeen += sz;
+        read += data.length;
+        done += data.length;
+        options.progressCb?.(Math.min(0.99, read / totalLen), filesSeen, bytesSeen);
       }
-      const toRead = Math.min(chunkSize, totalLen - read);
-      const data = readAt(handle, mftOffset + read, toRead);
-      if (data.length === 0) break;
-      const [n, sz] = parseMftBuffer(data, recordSize, records, Math.floor(read / recordSize));
-      filesSeen += n;
-      bytesSeen += sz;
-      options.progressCb?.(
-        Math.min(0.99, (read + data.length) / totalLen), filesSeen, bytesSeen
-      );
-      read += data.length;
     }
   } finally {
     CloseHandle(handle);
+  }
+
+  if (records.size === 0) {
+    throw new MftUnavailableError("MFT 解析结果为空，降级 walk");
   }
 
   options.progressCb?.(0.99, filesSeenTotal(records), bytesSeenTotal(records));

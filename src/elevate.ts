@@ -8,6 +8,7 @@
  */
 
 import koffi from "koffi";
+import path from "node:path";
 
 const kernel32 = koffi.load("kernel32.dll");
 const shell32 = koffi.load("shell32.dll");
@@ -40,17 +41,18 @@ function wideBuf(s: string): Buffer {
   return Buffer.concat([Buffer.from(s, "utf16le"), Buffer.alloc(2)]);
 }
 
-/** 手工布局 x64 SHELLEXECUTEINFOW（112 字节）。 */
+/** 手工布局 x64 SHELLEXECUTEINFOW（112 字节）。宽字符缓冲区由调用方持有直至调用完成。 */
 function buildSeei(
   fMask: number,
   lpVerb: Buffer,
   lpFile: Buffer,
-  lpParameters: Buffer
-): { seei: Buffer; addrs: unknown[] } {
+  lpParameters: Buffer,
+  lpDirectory: Buffer
+): Buffer {
   const verbAddr = koffi.address(lpVerb);
   const fileAddr = koffi.address(lpFile);
   const paramsAddr = koffi.address(lpParameters);
-  const addrs = [verbAddr, fileAddr, paramsAddr];
+  const dirAddr = koffi.address(lpDirectory);
   const seei = Buffer.alloc(112);
   seei.writeUInt32LE(112, 0); // cbSize
   seei.writeUInt32LE(fMask, 4); // fMask
@@ -58,10 +60,10 @@ function buildSeei(
   seei.writeBigUInt64LE(verbAddr, 16); // lpVerb
   seei.writeBigUInt64LE(fileAddr, 24); // lpFile
   seei.writeBigUInt64LE(paramsAddr, 32); // lpParameters
-  // lpDirectory @40 = 0
+  seei.writeBigUInt64LE(dirAddr, 40); // lpDirectory
   seei.writeUInt32LE(0, 48); // nShow = SW_HIDE
   seei.writeBigUInt64LE(0n, 104); // hProcess（出参）
-  return { seei, addrs };
+  return seei;
 }
 
 /** 计算提权后子进程的命令参数。 */
@@ -70,6 +72,27 @@ export function buildElevatedArgs(cliArgs: readonly string[]): string[] {
   return entry.endsWith(".ts")
     ? ["--import", "tsx", entry, ...cliArgs] // 开发模式：tsx 加载 TS 入口
     : [entry, ...cliArgs];
+}
+
+/** 按 Windows 命令行规则转义单个参数（含空白/引号时包裹引号并转义）。 */
+export function quoteArg(arg: string): string {
+  if (arg.length > 0 && !/[\s"]/.test(arg)) return arg;
+  let out = '"';
+  for (let i = 0; i < arg.length; i++) {
+    let backslashes = 0;
+    while (i < arg.length && arg[i] === "\\") {
+      backslashes++;
+      i++;
+    }
+    if (i >= arg.length) {
+      out += "\\".repeat(backslashes * 2);
+    } else if (arg[i] === '"') {
+      out += "\\".repeat(backslashes * 2 + 1) + '"';
+    } else {
+      out += "\\".repeat(backslashes) + arg[i];
+    }
+  }
+  return out + '"';
 }
 
 /**
@@ -82,13 +105,17 @@ export function buildElevatedArgs(cliArgs: readonly string[]): string[] {
 export function elevateAndWait(cliArgs: readonly string[]): number {
   if (process.platform !== "win32") throw new ElevateCancelled("仅 Windows 支持 UAC 提权");
   const args = buildElevatedArgs(cliArgs);
-  const { seei } = buildSeei(
-    SEE_MASK_NOCLOSEPROCESS,
-    wideBuf("runas"),
-    wideBuf(process.execPath),
-    wideBuf(args.join(" "))
-  );
+  const lpVerb = wideBuf("runas");
+  const lpFile = wideBuf(process.execPath);
+  const lpParameters = wideBuf(args.map(quoteArg).join(" "));
+  const entry = process.argv[1] ?? "";
+  const lpDirectory = wideBuf(entry ? path.dirname(entry) : path.dirname(process.execPath));
+  const seei = buildSeei(SEE_MASK_NOCLOSEPROCESS, lpVerb, lpFile, lpParameters, lpDirectory);
   const ok = ShellExecuteExW(seei);
+  void lpVerb;
+  void lpFile;
+  void lpParameters;
+  void lpDirectory;
   const hProcess = seei.readBigUInt64LE(104);
   if (!ok || hProcess === 0n) {
     // 失败路径：SE_ERR ≤32 表示具体错误（5=用户取消 UAC）

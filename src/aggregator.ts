@@ -248,6 +248,7 @@ export class Aggregator {
         skipped_paths: result.skippedPaths.slice(0, 5),
         scan_time_sec: Math.round(result.elapsedSec * 10) / 10,
         scan_mode: result.mode,
+        ...(result.mftError ? { mft_degraded_reason: result.mftError } : {}),
         entities_count: entityDicts.length,
         entities_truncated: truncated,
         cache_dirs_count: this.cacheDirs.length,

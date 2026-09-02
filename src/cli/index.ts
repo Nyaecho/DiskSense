@@ -172,19 +172,23 @@ program
   .option("--no-elevate", "禁用自动 UAC 提权（非管理员时静默降级 walk 扫描）")
   .action(async (opts) => {
     ensureDataDirs();
+    const elevWarnings: string[] = [];
     // 自动提权：本地固定盘 + 非管理员 → UAC 拉起提权子进程走 MFT 快速路径
     if (opts.elevate && shouldElevateFor(opts.drive)) {
       const outFile = path.join(os.tmpdir(), `disk-sense-elevated-${process.pid}-${Date.now()}.json`);
-      let elevatedFailed = false;
+      let exitCode = 0;
       try {
-        elevateAndWait(["_elevated-scan", "--drive", String(opts.drive), "--out", outFile]);
+        exitCode = elevateAndWait([
+          "_elevated-scan", "--drive", String(opts.drive), "--out", outFile,
+        ]);
       } catch (e) {
-        if (!(e instanceof ElevateCancelled)) elevatedFailed = true; // 提权执行出错
-        // 用户取消 UAC → 静默降级普通扫描
-        void e;
+        elevWarnings.push(
+          e instanceof ElevateCancelled
+            ? `UAC 提权未成功：${e.message}；已降级遍历扫描`
+            : `提权执行出错：${e instanceof Error ? e.message : String(e)}；已降级遍历扫描`
+        );
       }
-      if (elevatedFailed || fs.existsSync(outFile)) {
-        if (!fs.existsSync(outFile)) fail("提权扫描失败：子进程未产出结果");
+      if (fs.existsSync(outFile)) {
         process.stdout.write(fs.readFileSync(outFile, "utf-8"));
         try {
           fs.unlinkSync(outFile);
@@ -192,6 +196,9 @@ program
           /* 忽略 */
         }
         return;
+      }
+      if (elevWarnings.length === 0) {
+        elevWarnings.push(`提权子进程异常退出（code=${exitCode}）且未产出结果，已降级遍历扫描`);
       }
     }
     try {
@@ -201,7 +208,9 @@ program
         cfg: cfg.scan,
         ignoreGlobs: prefs.ignorePatterns,
       });
-      out(finishScan(opts.drive, result));
+      const payload = finishScan(opts.drive, result);
+      if (elevWarnings.length > 0) payload["warnings"] = elevWarnings;
+      out(payload);
     } catch (e) {
       fail(e instanceof Error ? e.message : String(e));
     }

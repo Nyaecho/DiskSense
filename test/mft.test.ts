@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   applyFixups,
   buildTree,
+  extractMftRuns,
   filetimeToUnix,
   parseMftBuffer,
   parseRecord,
+  parseRunlist,
   parseVolumeData,
   type MftRecord,
 } from "../src/scanner/mft.js";
@@ -140,11 +142,19 @@ describe("parseRecord", () => {
     expect(applyFixups(Buffer.alloc(1024))).toBeNull();
   });
 
-  it("含 $ATTRIBUTE_LIST 的记录跳过", () => {
+  it("含 $ATTRIBUTE_LIST 的记录仍提取驻留 $FILE_NAME", () => {
     const attrs = Buffer.concat([
       residentAttr(0x20, Buffer.alloc(32)),
       residentAttr(0x30, fileNameValue(5, "y", 9)),
     ]);
+    const rec = parseRecord(makeRecord(attrs));
+    expect(rec).not.toBeNull();
+    expect(rec!.name).toBe("y");
+    expect(rec!.parent).toBe(5);
+  });
+
+  it("仅含 $ATTRIBUTE_LIST 无 $FILE_NAME 的记录返回 null", () => {
+    const attrs = residentAttr(0x20, Buffer.alloc(32));
     expect(parseRecord(makeRecord(attrs))).toBeNull();
   });
 
@@ -186,28 +196,117 @@ describe("parseRecord", () => {
 });
 
 describe("parseVolumeData", () => {
-  function pack11q(values: number[]): Buffer {
-    const b = Buffer.alloc(88);
-    values.forEach((v, i) => b.writeBigInt64LE(BigInt(v), i * 8));
+  /** 按权威 DWORD 布局构造（winioctl.h + Win11 实测）。 */
+  function packVolumeData(o: {
+    sectors?: number;
+    totalClusters?: number;
+    free?: number;
+    reserved?: number;
+    sectorSize?: number;
+    clusterSize?: number;
+    frs?: number;
+    cpfrs?: number;
+    mftVdl?: number;
+    mftStart?: number;
+  } = {}): Buffer {
+    const b = Buffer.alloc(96);
+    b.writeBigInt64LE(0x06068b25068b1539n, 0);
+    b.writeBigInt64LE(BigInt(o.sectors ?? 251_672_575), 8);
+    b.writeBigInt64LE(BigInt(o.totalClusters ?? 31_459_071), 16);
+    b.writeBigInt64LE(BigInt(o.free ?? 5_374_210), 24);
+    b.writeBigInt64LE(BigInt(o.reserved ?? 663_007), 32);
+    b.writeUInt32LE(o.sectorSize ?? 512, 40);
+    b.writeUInt32LE(o.clusterSize ?? 0x100000, 44);
+    b.writeUInt32LE(o.frs ?? 1024, 48);
+    b.writeUInt32LE(o.cpfrs ?? 0, 52);
+    b.writeBigInt64LE(BigInt(o.mftVdl ?? 1_232_076_800), 56);
+    b.writeBigInt64LE(BigInt(o.mftStart ?? 786_432), 64);
+    b.writeBigInt64LE(2n, 72);
+    b.writeBigInt64LE(BigInt(23_592_000), 80);
+    b.writeBigInt64LE(BigInt(23_643_200), 88);
     return b;
   }
 
-  it("往返解析", () => {
-    const info = parseVolumeData(pack11q([1, 2, 3, 4, 5, 4096, 512, 1024, 0, 400_000_000, 786_432]));
+  it("往返解析（Win11 实测数据，@44 簇字段失真时仍正确推导）", () => {
+    const info = parseVolumeData(packVolumeData());
     expect(info.bytesPerCluster).toBe(4096);
     expect(info.bytesPerFrs).toBe(1024);
-    expect(info.mftValidDataLength).toBe(400_000_000);
+    expect(info.mftValidDataLength).toBe(1_232_076_800);
     expect(info.mftStartLcn).toBe(786_432);
   });
 
+  it("经典布局（@44 为真实簇大小）同样正确", () => {
+    const info = parseVolumeData(packVolumeData({ clusterSize: 4096 }));
+    expect(info.bytesPerCluster).toBe(4096);
+  });
+
   it("短缓冲拒绝", () => {
-    expect(() => parseVolumeData(Buffer.alloc(16))).toThrow();
+    expect(() => parseVolumeData(Buffer.alloc(88))).toThrow();
+  });
+
+  it("推导失败拒绝（totalClusters=0）", () => {
+    expect(() => parseVolumeData(packVolumeData({ totalClusters: 0 }))).toThrow();
   });
 
   it("非法 FRS 拒绝", () => {
-    expect(() =>
-      parseVolumeData(pack11q([1, 1, 1, 1, 1, 1, 1, 0, 0, 100, 100]))
-    ).toThrow();
+    expect(() => parseVolumeData(packVolumeData({ frs: 1000 }))).toThrow();
+    expect(() => parseVolumeData(packVolumeData({ frs: 0 }))).toThrow();
+  });
+
+  it("非法 MFT 定位拒绝", () => {
+    expect(() => parseVolumeData(packVolumeData({ mftVdl: 0 }))).toThrow();
+    expect(() => parseVolumeData(packVolumeData({ mftStart: -1 }))).toThrow();
+  });
+});
+
+describe("parseRunlist", () => {
+  it("单个区段（lenLen=1, offLen=3）", () => {
+    const b = Buffer.from([0x31, 0x40, 0x00, 0x00, 0x0c, 0x00]);
+    expect(parseRunlist(b, 0)).toEqual([{ startLcn: 0xc0000, clusters: 0x40 }]);
+  });
+
+  it("多区段含负相对偏移", () => {
+    const b = Buffer.from([0x31, 0x40, 0x00, 0x00, 0x0c, 0x11, 0x10, 0xf0, 0x00]);
+    const runs = parseRunlist(b, 0);
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toEqual({ startLcn: 0xc0000, clusters: 0x40 });
+    expect(runs[1]).toEqual({ startLcn: 0xc0000 - 0x10, clusters: 0x10 });
+  });
+
+  it("终止符结束 / 稀疏区段停止 / 越界停止", () => {
+    expect(parseRunlist(Buffer.from([0x00]), 0)).toEqual([]);
+    expect(parseRunlist(Buffer.from([0x21]), 0)).toEqual([]);
+    expect(parseRunlist(Buffer.from([0x31, 0x40]), 0)).toEqual([]);
+  });
+});
+
+describe("extractMftRuns", () => {
+  function mftRecord0(runlist: Buffer): Buffer {
+    const attr = Buffer.alloc(0x50);
+    attr.writeUInt32LE(0x80, 0); // $DATA
+    attr.writeUInt32LE(attr.length, 4);
+    attr.writeUInt8(1, 8); // nonResident
+    attr.writeUInt32LE(0x40, 0x20); // runlist 偏移（相对属性头）
+    runlist.copy(attr, 0x40);
+    return makeRecord(Buffer.concat([residentAttr(0x30, fileNameValue(5, "$MFT", 0)), attr]));
+  }
+
+  it("提取 $DATA runlist", () => {
+    const runs = extractMftRuns(mftRecord0(Buffer.from([0x31, 0x40, 0x00, 0x00, 0x0c, 0x00])));
+    expect(runs).toEqual([{ startLcn: 0xc0000, clusters: 0x40 }]);
+  });
+
+  it("非 $MFT 魔数返回 null", () => {
+    expect(extractMftRuns(Buffer.alloc(1024))).toBeNull();
+  });
+
+  it("驻留 $DATA（无 runlist）返回 null", () => {
+    const attr = Buffer.alloc(0x50);
+    attr.writeUInt32LE(0x80, 0);
+    attr.writeUInt32LE(attr.length, 4);
+    attr.writeUInt8(0, 8); // resident
+    const rec = makeRecord(Buffer.concat([residentAttr(0x30, fileNameValue(5, "$MFT", 0)), attr]));
+    expect(extractMftRuns(rec)).toBeNull();
   });
 });
 
