@@ -28,7 +28,7 @@ jobs:
     needs: test
     runs-on: windows-latest
     permissions:
-      id-token: write
+      id-token: write # Trusted Publishing (OIDC) 必需
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,6 +37,5 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted Publishing：npm ≥ 11.5.1 自动用 OIDC 短令牌发布，provenance 自动生成
+      - run: npm publish --access public
