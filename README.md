@@ -37,13 +37,15 @@ DiskSense 是一个 **Agent Skill 包**：`SKILL.md`（提示词）+ `disk-sense
 
 | 能力 | 说明 |
 | :--- | :--- |
-| 极速扫描 | 本地 NTFS 盘优先 MFT 直读（需管理员，自动降级并发遍历） |
+| 极速扫描 | 本地 NTFS 盘优先 MFT 直读（需管理员，自动降级并发遍历），含 ctime 采集 |
 | 指纹聚合 | 百万文件 → 50~200 个「软件实体」档案（≤5000 Token），附语义信号 |
 | 语义信号 | `CACHE_DOMINANT`、`EXE_MISSING` 等结构化规则信号，Agent 即时推理 |
+| 快照版本化 | 同根重复扫描自动归档旧快照（每根保留 N 份），**永不覆盖丢失** |
+| 跨会话对比 | `diff_sessions` 新增/消失/变更 + 目录聚合 Top N；`growth_report` 按时间窗查增长 |
 | 高亮指令 | `viz_command` 记录高亮/标注指令（JSONL 持久化，可增量查询回放） |
 | 可逆操作 | 删除强制回收站 + $R 精确映射 + SQLite 日志 + 五步回滚 |
 | 新鲜度账本 | 会话级 `op_count` / 节点级 `stale` / 执行时预检，三层防过时改动 |
-| 无 daemon | 无后台服务；会话状态落盘 `%LOCALAPPDATA%\disk-sense\`，npm 一装即用 |
+| 无 daemon | 无后台服务；会话状态落盘 `%LOCALAPPDATA%\disk-sense\sessions.db`，npm 一装即用 |
 
 ## 快速开始
 
@@ -103,7 +105,7 @@ mklink /J "%USERPROFILE%\.agents\skills\disk-sense-manager" "<仓库绝对路径
 | `operator/recycle-bin.ts` | SHFileOperationW 回收站删除、$I/$R 解析、受控清空 |
 | `operator/file-operator.ts` | move/copy/compress + 五步回滚 + 保护路径拒绝 |
 | `operator/undo-manager.ts` | SQLite 操作日志、超期归档 |
-| `state/session.ts` | 会话持久化 + op_count 新鲜度账本 + 子树 stale 标记 |
+| `state/session.ts` | SQLite 会话库（live 行式 + 归档 gzip blob）+ 快照版本化 + op_count 新鲜度账本 |
 
 ## 新鲜度账本（三层防线）
 

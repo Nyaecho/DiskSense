@@ -32,20 +32,25 @@ import {
 } from "../operator/recycle-bin.js";
 import { UndoManager } from "../operator/undo-manager.js";
 import { JobStore, jobToDict, JOB_SUCCEEDED, JOB_FAILED } from "../operator/jobs.js";
-import type { StoredSession, TreeNodeJSON } from "../state/session.js";
+import type { StoredSession } from "../state/session.js";
 import {
   saveSession,
   loadSessionById,
   loadLatestSession,
+  listSessions,
+  exportSessionToFile,
+  mergeRescanSubtree,
   recordOperation,
   recordOperationForSources,
-  resetFreshness,
-  sessionFileForRoot,
-  treeToJSON,
-  treeFromJSON,
 } from "../state/session.js";
 import { appendOverlay, queryOverlays, clearOverlays } from "../state/overlays.js";
 import { buildSubtree, findNode, queryDetail, sessionMeta } from "./session-query.js";
+import {
+  diffSessions,
+  growthReport,
+  parseTimestampArg,
+  resolveCurrentSession,
+} from "./session-diff.js";
 import { dirStat, pathSize, searchDirs } from "./fsutils.js";
 import { registerWorkerCommand } from "./worker.js";
 
@@ -94,37 +99,7 @@ function requireSession(opts: { session?: string }): StoredSession {
   return s;
 }
 
-/** 在存储树中按小写段序列定位节点。 */
-function findChild(parent: TreeNodeJSON, seg: string): TreeNodeJSON | null {
-  return (
-    parent.children?.[seg] ??
-    Object.entries(parent.children ?? {}).find(([k]) => k.toLowerCase() === seg.toLowerCase())?.[1] ??
-    null
-  );
-}
-
-function recomputeSize(n: TreeNodeJSON): number {
-  if (!n.children || n.isLink) return n.size;
-  let total = 0;
-  for (const c of Object.values(n.children)) total += c.isDir ? recomputeSize(c) : c.size;
-  n.size = total;
-  return total;
-}
-
-function clearStaleDeep(n: TreeNodeJSON): void {
-  delete n.stale;
-  delete n.staleSince;
-  for (const c of Object.values(n.children ?? {})) clearStaleDeep(c);
-}
-
-function atomicRewrite(sess: StoredSession): void {
-  const f = sessionFileForRoot(sess.root_path);
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  const tmp = `${f}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(sess), "utf-8");
-  fs.renameSync(tmp, f);
-}
-
+/** 同步等待（仅异步任务轮询用）。 */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -145,11 +120,17 @@ function finishScan(drive: string, result: Awaited<ReturnType<typeof scan>>): Re
     pseudoEntityPaths: prefs.pseudoEntityPaths,
   });
   const fingerprint = agg.aggregate(result, sessionId);
-  saveSession(result, drive, sessionId, {
+  const { archived } = saveSession(result, drive, sessionId, {
     fingerprint,
     entityDetail: Object.fromEntries(agg.entityTopFiles),
   });
-  return { status: "completed", session_id: sessionId, result: fingerprint };
+  return {
+    status: "completed",
+    session_id: sessionId,
+    result: fingerprint,
+    // 覆盖预警：旧 live 会话已自动归档（零拷贝），可作 diff_sessions 基线
+    ...(archived ? { old_session_archived: archived.session_id } : {}),
+  };
 }
 
 /** 是否值得为该扫描目标请求 UAC 提权（本地固定盘 + 当前非管理员）。 */
@@ -341,43 +322,10 @@ program
     const s = opts.session ? loadSessionById(opts.session) : loadLatestSession();
     if (!s) fail("无可用扫描会话，请先执行 start_scan");
     const abs = path.resolve(normalizeTarget(opts.path));
-    const rootLow = s.root_path.toLowerCase();
-    if (!abs.toLowerCase().startsWith(rootLow)) {
-      fail(`路径不在会话扫描根 ${s.root_path} 之内`);
-    }
     try {
-      // 重扫该子树（walk 模式），合并回存储树
+      // 重扫该子树（walk 模式），SQLite 事务内替换子树行并重算祖先体积
       const subResult = await scan(abs, { ignoreGlobs: [] });
-      const newNode: TreeNodeJSON = treeToJSON(subResult.root);
-      // 定位存储树中的父链并替换子树
-      let parent = s.tree;
-      const relSegments = abs
-        .toLowerCase()
-        .slice(rootLow.length)
-        .replace(/^\\+/, "")
-        .split("\\")
-        .filter(Boolean);
-      for (let i = 0; i < relSegments.length - 1; i++) {
-        const next = findChild(parent, relSegments[i]!);
-        if (!next) fail(`路径父链在快照中不存在: ${relSegments[i]}`);
-        parent = next;
-      }
-      const leafName = relSegments.at(-1);
-      if (!leafName || !parent.children) fail("无法定位替换位置");
-      const key =
-        leafName in parent.children
-          ? leafName
-          : Object.keys(parent.children).find((k) => k.toLowerCase() === leafName.toLowerCase());
-      if (!key) fail(`路径不在快照中: ${abs}`);
-      parent.children[key] = newNode;
-
-      // 沿祖先链重算体积；新子树内清除过期标记；重置新鲜度账本
-      recomputeSize(s.tree);
-      clearStaleDeep(newNode);
-      clearStaleDeep(s.tree);
-      s.op_count = 0;
-      s.recent_ops = [];
-      atomicRewrite(s);
+      mergeRescanSubtree(s, abs, subResult);
       out({
         status: "completed",
         path: abs,
@@ -392,14 +340,107 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// 跨会话时间维度（版本化基线 / diff / 增长报告）
+// ---------------------------------------------------------------------------
+program
+  .command("list_sessions")
+  .description("列出扫描会话（默认仅 live，--all 含归档；diff_sessions 基线发现入口）")
+  .option("--root <path>", "按根路径前缀过滤")
+  .option("--all", "包含已归档会话")
+  .action((opts) => {
+    out(listSessions(opts.root, Boolean(opts.all)));
+  });
+
+program
+  .command("diff_sessions")
+  .description("两次会话对比：新增/消失/变更文件 + 目录聚合 Top N（对比上次扫描）")
+  .requiredOption("--baseline <session_id>", "基线会话（通常为归档会话 id）")
+  .option("--current <session_id>", "当前会话（默认取基线同根的 live 会话）")
+  .option("--top <n>", "各榜单条数", "20")
+  .option("--depth <n>", "目录聚合深度（1-10）", "3")
+  .action((opts) => {
+    try {
+      const current = opts.current ?? resolveCurrentSession(opts.baseline);
+      out(
+        diffSessions(opts.baseline, current, {
+          top: Number(opts.top),
+          depth: Math.min(10, Math.max(1, Number(opts.depth))),
+        })
+      );
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
+  });
+
+program
+  .command("growth_report")
+  .description("按 mtime/ctime 时间窗聚合增长（无基线时的降级方案）")
+  .requiredOption("--since <ts>", "起始时刻（Unix 秒或 ISO 8601）")
+  .option("--until <ts>", "结束时刻（Unix 秒或 ISO 8601）")
+  .option("--by <field>", "过滤字段 mtime|ctime", "mtime")
+  .option("--depth <n>", "目录聚合深度（1-10）", "3")
+  .option("--top <n>", "各榜单条数", "20")
+  .option("--session <id>", "目标会话（默认最近 live 会话）")
+  .action((opts) => {
+    ensureDataDirs();
+    const s = opts.session ? loadSessionById(opts.session) : loadLatestSession();
+    if (!s) fail("无可用扫描会话，请先执行 start_scan");
+    if (opts.by !== "mtime" && opts.by !== "ctime") {
+      fail(`--by 仅支持 mtime|ctime: ${opts.by}`);
+    }
+    try {
+      const since = parseTimestampArg(opts.since, "--since");
+      const until = opts.until ? parseTimestampArg(opts.until, "--until") : undefined;
+      out(
+        growthReport(s.session_id, {
+          since,
+          until,
+          by: opts.by,
+          depth: Math.min(10, Math.max(1, Number(opts.depth))),
+          top: Number(opts.top),
+        })
+      );
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
+  });
+
+program
+  .command("export_session")
+  .description("导出任意会话（含归档）为 .json.gz 单文件（备份/外部分析）")
+  .requiredOption("--session <id>")
+  .option("--out <file>", "输出路径（默认 <数据目录>/export/<id>.json.gz）")
+  .action((opts) => {
+    try {
+      out(exportSessionToFile(opts.session, opts.out));
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // 高亮指令
 // ---------------------------------------------------------------------------
+/**
+ * JSON 参数读取：值以 `@` 开头时从文件读取（如 --payload @payload.json），
+ * 避免 PowerShell 下内联 JSON 的转义地狱；否则原样返回。
+ */
+export function readJsonArg(v: string, name: string): string {
+  if (!v.startsWith("@")) return v;
+  const file = v.slice(1);
+  try {
+    return fs.readFileSync(file, "utf-8");
+  } catch (e) {
+    throw new Error(`${name} 读取文件失败 (${file}): ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 program
   .command("viz_command")
   .description("记录高亮/标注指令（服务端留存，供审计/回放）")
   .requiredOption("--action <action>")
-  .option("--target <json>", '目标 JSON，如 \'{"id":"wechat"}\'')
-  .option("--payload <json>")
+  .option("--target <json>", '目标 JSON，如 \'{"id":"wechat"}\' 或 @target.json')
+  .option("--payload <json>", "payload JSON，支持 @file.json 从文件读取")
   .action((opts) => {
     const validActions = ["highlight", "label", "group", "protect", "clear"];
     if (!validActions.includes(opts.action)) {
@@ -408,7 +449,7 @@ program
     const parseJson = (v: unknown, name: string): unknown => {
       if (v === undefined) return undefined;
       try {
-        return JSON.parse(String(v));
+        return JSON.parse(readJsonArg(String(v), name));
       } catch {
         return fail(`${name} 不是合法 JSON`);
       }
@@ -453,7 +494,7 @@ async function executeOperationHandler(opts: ExecOpts): Promise<void> {
 
   let sources: string[];
   try {
-    const parsed = JSON.parse(opts.sources);
+    const parsed = JSON.parse(readJsonArg(opts.sources, "--sources"));
     if (!Array.isArray(parsed)) throw new Error("sources 必须是 JSON 数组");
     sources = parsed.map(String).filter(Boolean);
   } catch (e) {
@@ -572,7 +613,7 @@ program
   .command("execute_operation")
   .description("执行 move/copy/delete/compress 操作（删除自动走回收站，可撤销）")
   .requiredOption("--op_type <type>")
-  .requiredOption("--sources <json>")
+  .requiredOption("--sources <json>", 'JSON 数组，支持 @file.json 从文件读取')
   .option("--dest <dir>")
   .option("--async", "大体积操作异步模式（立即返回 job_id）")
   .option("--wait", "配合 --async：轮询直到结束")

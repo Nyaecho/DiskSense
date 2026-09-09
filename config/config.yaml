@@ -12,3 +12,7 @@ scan:
 
 history:
   retention_days: 30            # SQLite 操作日志保留天数，超期归档至 Data/archive/
+
+sessions:
+  archive_keep: 5               # 每根路径保留的归档快照份数（同根新扫描自动归档旧快照，
+                                # 供 diff_sessions 对比；超出裁剪最旧）

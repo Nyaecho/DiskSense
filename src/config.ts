@@ -72,6 +72,15 @@ export function opLogDb(): string {
   return path.join(dataHome(), "op_log.db");
 }
 
+export function sessionsDbFile(): string {
+  return path.join(dataHome(), "sessions.db");
+}
+
+/** 导出会话的默认输出目录（export_session）。 */
+export function exportDir(): string {
+  return path.join(dataHome(), "export");
+}
+
 export function prefsFile(): string {
   return path.join(dataHome(), "user_preferences.json");
 }
@@ -106,9 +115,15 @@ export interface HistoryConfig {
   retentionDays: number;
 }
 
+export interface SessionsConfig {
+  /** 每根路径保留的归档会话份数（超出裁剪最旧） */
+  archiveKeep: number;
+}
+
 export interface Config {
   scan: ScanConfig;
   history: HistoryConfig;
+  sessions: SessionsConfig;
 }
 
 const DEFAULT_DIR_IGNORES = ["$RECYCLE.BIN", "System Volume Information"];
@@ -145,5 +160,6 @@ export function loadConfig(filePath?: string): Config {
       defaultDirIgnores: [...DEFAULT_DIR_IGNORES],
     }),
     history: pick("history", { retentionDays: 30 }),
+    sessions: pick("sessions", { archiveKeep: 5 }),
   };
 }

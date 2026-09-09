@@ -47,7 +47,8 @@ allowed-tools: Bash, Read, Write
 
 - **`start_scan --drive C:`**
   - 功能：启动磁盘/目录扫描，同步等待完成并返回指纹档案 JSON
-  - 返回：`{"status":"completed","session_id":"...","result":{"entities":[...],"global_anomalies":[...],"summary":{...},"signals_legend":{...}}}`
+  - 返回：`{"status":"completed","session_id":"...","result":{...},"old_session_archived":"sess-xxx"?}`——同根路径重复扫描时，旧会话**自动归档**（永不覆盖丢失），`old_session_archived` 即归档的基线会话 id，可直接喂给 `diff_sessions --baseline`
+  - 会话存储于 `sessions.db`（live 会话行式 + 归档会话 gzip 压缩，每根路径保留最近 5 份归档，见 `config.yaml` 的 `sessions.archive_keep`）
   - 实体字段：`id`、`display`、`total_size_mb`、`locations.{role}.{size_mb,file_count,has_exe}`、`signals`、`last_access_days`、`top_extensions`、`location_anomaly`、`tags`
 
 - **`query_detail --entity_id wechat --category cache`**
@@ -71,6 +72,22 @@ allowed-tools: Bash, Read, Write
 - **`subtree --path "D:\work" --depth 2`**（treemap 钻取，需先扫描）
   - 单层超 200 项按体积降序截断并附 `omitted` 计数；过期节点带 `stale:true`；输出附 `stale_hint` 新鲜度提示
 
+- **`list_sessions [--root C:] [--all]`**（会话发现入口）
+  - 列出扫描会话：默认仅 live，`--all` 含归档；`diff_sessions` 的基线 id 从这里找
+
+- **`diff_sessions --baseline <session_id> [--current <id>] [--top 20] [--depth 3]`**（对比上次扫描）
+  - 两次会话逐文件对比（按路径联接，大小写不敏感）：新增/消失/变更文件 + **按目录聚合的增长/缩减 Top N** + 汇总
+  - `--baseline` 通常填 `start_scan` 返回的 `old_session_archived`；`--current` 省略时自动取基线同根的 live 会话
+  - 返回：`{"summary":{"files_added":N,"bytes_added":N,"net_delta_bytes":N,...},"top_dirs_by_delta":[{"dir":"...","delta_bytes":N}],"top_new_files":[...],"top_removed_files":[...],"top_changed_files":[...]}`
+
+- **`growth_report --since <ts> [--until <ts>] [--by mtime|ctime] [--depth 3] [--top 20] [--session <id>]`**（无基线时的降级方案）
+  - 按文件时间窗（`--since` 支持 Unix 秒或 ISO 8601）过滤 + 目录聚合，回答「最近 N 天哪些目录写入最多」
+  - 新扫描已采集 `ctime`（创建时间）；旧会话无 ctime 时会提示回退 `--by mtime`
+  - 返回：`{"total_bytes":N,"total_files":N,"top_dirs":[{"dir":"...","bytes":N,"files":N}],"top_files":[...]}`
+
+- **`export_session --session <id> [--out <file>]`**
+  - 导出任意会话（含归档）为 `.json.gz` 单文件（备份/外部分析），默认写 `<数据目录>/export/`
+
 - **伪实体与缓存信号说明**
   - 扫描无已知软件实体（纯数据盘）时自动按顶层目录生成**伪实体**（`kind:"pseudo"`，指纹带 `pseudo_entities:true`），`query_detail` 照常可用；偏好 `pseudo_entity_paths` 可标记路径优先切分
   - 命中内置缓存模式库（pnpm/yarn/pip/conda/huggingface/torch 等，可在 `config/classification_rules.yaml` 的 `cache_dir_patterns` 扩展）的目录进入指纹 `cache_dirs`（带 `CACHE_DOMINANT:<type>` 信号）
@@ -79,6 +96,7 @@ allowed-tools: Bash, Read, Write
 
 - **`viz_command --action highlight --target '{"id":"wechat"}' --payload '{"color":"#FF4500","label":"卸载残留","effect":"pulse"}'`
   - `action`：`highlight` | `label` | `group`（target 用 `{"ids":[...]}`）| `protect`（target 用 `{"path":"D:/Work"}`）| `clear`
+  - **JSON 参数支持 `@file`**：`--target @target.json` / `--payload @payload.json` 从文件读取，避免 shell 转义问题
   - 返回：`{"status":"ok","seq":N}`（seq 递增，供增量查询）
 - **`query_overlays --since_seq 0`**：取回 seq 之后的高亮指令增量（最近 100 条）
 
@@ -87,6 +105,7 @@ allowed-tools: Bash, Read, Write
 - **`execute_operation --op_type move --sources '["C:/a.txt"]' --dest "D:/"`**
   - `op_type`：`move` | `copy` | `delete` | `compress`
   - **删除自动走回收站**，绝不永久擦除；每次操作返回 `op_uuid`
+  - `--sources` 支持 `@file.json` 从文件读取 JSON 数组（大列表免转义）
   - 执行前自动预检：源路径在快照中存在但当前消失 → 拒绝并报 `stale_conflict`；mtime 不一致 → 附 `warnings` 告警（`--strict` 升级为拒绝）
   - **`--async`（大体积操作异步模式）**：立即返回 `job_id`，后台 detached 子进程执行，审计/回收站/撤销与同步完全等价；`--wait` 可选轮询到结束
   - 返回：`{"op_uuid":"...","status":"completed","results":[{"source":"...","status":"done","recycle_bin_name":"$R..."}]}`
