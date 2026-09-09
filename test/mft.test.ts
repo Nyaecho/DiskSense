@@ -32,14 +32,15 @@ function fileNameValue(
   name: string,
   size: number,
   mtime = 1000.0,
-  atime = 2000.0
+  atime = 2000.0,
+  ctime = 500.0
 ): Buffer {
   return Buffer.concat([
     u64v(parent),
-    u64v(0),
+    u64v(ft(ctime)),  // v+0x08 创建时间（C Time）
     u64v(ft(mtime)),
     u64v(0),
-    u64v(ft(atime)), // 创建/修改/MFT修改/访问（布局对齐 Python 版）
+    u64v(ft(atime)),
     u64v(size),
     u64v(size),
     Buffer.alloc(8), // flags/ea (2×u32)
@@ -114,6 +115,7 @@ describe("parseRecord", () => {
     expect(rec!.size).toBe(1234);
     expect(rec!.mtime).toBeCloseTo(1000.0);
     expect(rec!.atime).toBeCloseTo(2000.0);
+    expect(rec!.ctime).toBeCloseTo(500.0);
     expect(rec!.flags).toBe(0);
   });
 
@@ -334,7 +336,7 @@ describe("parseMftBuffer", () => {
 describe("buildTree", () => {
   function records(): Map<number, MftRecord> {
     const r = (parent: number, name: string, size: number, flags: number): MftRecord => ({
-      parent, name, size, mtime: 1.0, atime: 1.0, flags,
+      parent, name, size, mtime: 1.0, atime: 1.0, ctime: 1.0, flags,
     });
     return new Map([
       [5, r(5, "C:", 0, 1)],
@@ -377,9 +379,9 @@ describe("buildTree", () => {
 
   it("忽略点条目", () => {
     const recs = new Map<number, MftRecord>([
-      [5, { parent: 5, name: "C:", size: 0, mtime: 0, atime: 0, flags: 1 }],
-      [10, { parent: 5, name: ".", size: 0, mtime: 0, atime: 0, flags: 1 }],
-      [11, { parent: 5, name: "..", size: 0, mtime: 0, atime: 0, flags: 1 }],
+      [5, { parent: 5, name: "C:", size: 0, mtime: 0, atime: 0, ctime: 0, flags: 1 }],
+      [10, { parent: 5, name: ".", size: 0, mtime: 0, atime: 0, ctime: 0, flags: 1 }],
+      [11, { parent: 5, name: "..", size: 0, mtime: 0, atime: 0, ctime: 0, flags: 1 }],
     ]);
     const [root] = buildTree(recs, "C:", []);
     expect(root.children?.size ?? 0).toBe(0);
@@ -387,9 +389,9 @@ describe("buildTree", () => {
 
   it("环防护", () => {
     const recs = new Map<number, MftRecord>([
-      [5, { parent: 5, name: "C:", size: 0, mtime: 0, atime: 0, flags: 1 }],
-      [100, { parent: 101, name: "a", size: 0, mtime: 0, atime: 0, flags: 1 }],
-      [101, { parent: 100, name: "b", size: 0, mtime: 0, atime: 0, flags: 1 }],
+      [5, { parent: 5, name: "C:", size: 0, mtime: 0, atime: 0, ctime: 0, flags: 1 }],
+      [100, { parent: 101, name: "a", size: 0, mtime: 0, atime: 0, ctime: 0, flags: 1 }],
+      [101, { parent: 100, name: "b", size: 0, mtime: 0, atime: 0, ctime: 0, flags: 1 }],
     ]);
     const [root] = buildTree(recs, "C:", []);
     expect(root.children?.size ?? 0).toBe(0);

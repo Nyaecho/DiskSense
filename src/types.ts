@@ -14,6 +14,8 @@ export interface TreeNode {
   /** 修改/访问时间（Unix 时间戳，秒） */
   mtime: number;
   atime: number;
+  /** 创建时间（Unix 时间戳，秒）；旧版会话/部分来源可能缺失 */
+  ctime?: number;
   isDir: boolean;
   /** Junction/符号链接（不向下遍历，防死循环） */
   isLink: boolean;

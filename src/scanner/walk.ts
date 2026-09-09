@@ -92,6 +92,7 @@ async function scanOneDir(
               size: 0,
               mtime: st.mtimeMs / 1000,
               atime: st.atimeMs / 1000,
+              ctime: st.ctimeMs / 1000,
               isDir: true,
               isLink: true,
             })
@@ -100,6 +101,7 @@ async function scanOneDir(
           const node = createNode(name, {
             mtime: st.mtimeMs / 1000,
             atime: st.atimeMs / 1000,
+            ctime: st.ctimeMs / 1000,
             isDir: true,
           });
           node.children = new Map();
@@ -116,6 +118,7 @@ async function scanOneDir(
             size: Number(st.size),
             mtime: st.mtimeMs / 1000,
             atime: st.atimeMs / 1000,
+            ctime: st.ctimeMs / 1000,
           })
         );
         state.addFile(st.size);

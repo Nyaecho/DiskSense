@@ -42,6 +42,7 @@ export interface MftRecord {
   size: number;
   mtime: number;
   atime: number;
+  ctime: number;
   /** bit0 = 目录, bit1 = 重解析点(Junction/符号链接) */
   flags: number;
 }
@@ -140,13 +141,14 @@ export function parseRecord(buf: Buffer): MftRecord | null {
   const end = Math.min(used, buf.length);
   if (attrsOff < 0x30 || attrsOff >= end) return null;
 
-  // (ns, parent, name, mtime, atime)
+  // (ns, parent, name, ctime, mtime, atime)
   interface NameEntry {
     ns: number;
     parent: number;
     name: string;
     mtime: number;
     atime: number;
+    ctime: number;
   }
   const names: NameEntry[] = [];
   let size = 0;
@@ -171,6 +173,7 @@ export function parseRecord(buf: Buffer): MftRecord | null {
       const v = off + vOff;
       if (vLen >= 0x42 && v + vLen <= off + aLen) {
         const parent = Number(u64(buf, v) & 0xffffffffffffn); // 低 48 位 = 记录号
+        const ctime = filetimeToUnix(u64(buf, v + 0x08));
         const mtime = filetimeToUnix(u64(buf, v + 0x10));
         const atime = filetimeToUnix(u64(buf, v + 0x20));
         size = Number(u64(buf, v + 0x30));
@@ -184,7 +187,7 @@ export function parseRecord(buf: Buffer): MftRecord | null {
           name = "";
         }
         if (name && parent > 0) {
-          names.push({ ns, parent, name, mtime, atime });
+          names.push({ ns, parent, name, mtime, atime, ctime });
         }
       }
     }
@@ -204,6 +207,7 @@ export function parseRecord(buf: Buffer): MftRecord | null {
     size,
     mtime: chosen.mtime,
     atime: chosen.atime,
+    ctime: chosen.ctime,
     flags: recFlags,
   };
 }
@@ -327,6 +331,7 @@ export function buildTree(
         size: isDir && !isLink ? 0 : crec.size,
         mtime: crec.mtime,
         atime: crec.atime,
+        ctime: crec.ctime,
         isDir,
         isLink,
       });
