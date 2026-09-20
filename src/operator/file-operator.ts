@@ -326,7 +326,17 @@ export class FileOperator {
       for (const s of chunk) {
         const id = idOf.get(s)!;
         const m = newItems.get(normPath(s));
-        if (fs.existsSync(s)) {
+        // 存在性判定带 50ms×6 有界复检：SHFileOperation 返回后高磁盘负载下
+        // 元数据结算可能滞后，单次 existsSync 会把已成功的删除误判为失败
+        let gone = false;
+        for (let i = 0; i < 6; i++) {
+          if (!fs.existsSync(s)) {
+            gone = true;
+            break;
+          }
+          if (i < 5) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        }
+        if (!gone) {
           const reason = shellErrorMsg ?? "删除后源路径仍存在";
           this.undo.updateEntry(id, { status: "FAILED", error_msg: reason });
           results.push({ source: s, status: "failed", error: reason });
