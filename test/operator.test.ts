@@ -5,7 +5,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { UndoManager } from "../src/operator/undo-manager.js";
-import { FileOperator, executeUndo } from "../src/operator/file-operator.js";
+import {
+  FileOperator,
+  executeUndo,
+  chunkSources,
+  CHUNK_CHAR_LIMIT,
+} from "../src/operator/file-operator.js";
 import { emptyRecycleBinForOp, parseIFile } from "../src/operator/recycle-bin.js";
 import { recycleBinAvailable, SKIP_RB_MSG } from "./helpers.js";
 
@@ -27,6 +32,44 @@ function makeTree(): string {
 }
 
 const maybeWin = process.platform === "win32" ? describe : describe.skip;
+
+describe("chunkSources 批量分片（SHFileOperationW pFrom 缓冲上限防护）", () => {
+  it("小批量单片不分", () => {
+    const chunks = chunkSources(["C:\\a\\1.txt", "C:\\a\\2.txt"]);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toHaveLength(2);
+  });
+
+  it("超 400 条按数量切片，条目不丢不重", () => {
+    const srcs = Array.from({ length: 1003 }, (_, i) => `C:\\data\\f${i}.txt`);
+    const chunks = chunkSources(srcs);
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    expect(chunks.every((c) => c.length <= 400)).toBe(true);
+    expect(chunks.flat().length).toBe(1003);
+    expect(new Set(chunks.flat()).size).toBe(1003);
+  });
+
+  it("超字符预算按体积切片", () => {
+    // 每条约 110 字符：280 条 ≈ 30.8K > 30K → 至少 2 片
+    const long = "C:\\" + "d".repeat(100);
+    const srcs = Array.from({ length: 280 }, (_, i) => `${long}\\f${String(i).padStart(4, "0")}.txt`);
+    const chunks = chunkSources(srcs);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    for (const c of chunks) {
+      const chars = c.reduce((acc, s) => acc + s.length + 1, 0);
+      expect(chars).toBeLessThanOrEqual(CHUNK_CHAR_LIMIT);
+    }
+    expect(chunks.flat().length).toBe(280);
+  });
+
+  it("不同盘符分开切片（各盘独立快照比对）", () => {
+    if (process.platform !== "win32") return;
+    const c = path.parse(path.resolve("C:\\x")).root;
+    const chunks = chunkSources([`${c}a.txt`, `${c}b.txt`, "D:\\c.txt"]);
+    expect(chunks).toHaveLength(2);
+    expect(chunks.some((ch) => ch.includes("D:\\c.txt"))).toBe(true);
+  });
+});
 
 maybeWin("UndoManager", () => {
   it("日志批次：插入→更新→查询", () => {
@@ -149,6 +192,64 @@ maybeWin("FileOperator 删除→回收站→撤销（真实回收站往返）", 
     expect(again.emptied).toBe(0);
     undo.close();
   });
+
+  it("混合批次：缺失源跳过披露，存在源正常入回收站", { timeout: 20000 }, () => {
+    if (!recycleBinAvailable()) return console.warn(`[skip] ${SKIP_RB_MSG}`);
+    const src = makeTree();
+    const ghost = path.join(dir, "ghost-does-not-exist.txt");
+    const undo = new UndoManager(dbFile);
+    const op = new FileOperator(undo);
+
+    const result = op.delete([path.join(src, "a.txt"), ghost, path.join(src, "sub")]);
+    // 缺失不再中止全批
+    expect(result.status).toBe("completed");
+    expect(result.summary).toEqual({ total: 3, done: 2, failed: 0, skipped: 1 });
+    const skipEntry = result.results.find((r) => r.source === ghost)!;
+    expect(skipEntry.status).toBe("skipped");
+    expect(skipEntry.error).toContain("不存在");
+    // 存在源正常删除
+    expect(fs.existsSync(path.join(src, "a.txt"))).toBe(false);
+    expect(fs.existsSync(path.join(src, "sub"))).toBe(false);
+    // 台账：skipped 条目留痕
+    const rows = undo.getBatch(result.op_uuid);
+    expect(rows.find((r) => r.source_path === ghost)?.status).toBe("SKIPPED");
+    // 撤销：skipped 条目进 skipped 列表，其余正常还原
+    const undoResult = executeUndo(rows[0]!.id, undo);
+    expect(undoResult.status).toBe("success");
+    expect(undoResult.skipped?.some((s) => s.source === ghost)).toBe(true);
+    expect(fs.readFileSync(path.join(src, "a.txt"), "utf-8")).toBe("alpha content");
+    undo.close();
+  });
+
+  it("大批量：1000+ 文件分片删除全部成功且逐条有 $R 映射", { timeout: 120_000 }, () => {
+    if (!recycleBinAvailable()) return console.warn(`[skip] ${SKIP_RB_MSG}`);
+    // 构造 1000 个文件（超过单片 400 条限制，触发分片）
+    const root = path.join(dir, "bulk");
+    fs.mkdirSync(root, { recursive: true });
+    const files: string[] = [];
+    for (let i = 0; i < 1000; i++) {
+      const f = path.join(root, `f${String(i).padStart(4, "0")}.txt`);
+      fs.writeFileSync(f, "x");
+      files.push(f);
+    }
+    const undo = new UndoManager(dbFile);
+    const op = new FileOperator(undo);
+    const result = op.delete(files);
+
+    expect(result.status).toBe("completed");
+    expect(result.summary).toEqual({ total: 1000, done: 1000, failed: 0, skipped: 0 });
+    expect(result.moved_bytes).toBe(1000);
+    // 逐条都有 error 字段缺失 = done；失败的必须有 error（不静默）
+    for (const r of result.results) {
+      if (r.status === "failed") expect(r.error).toBeTruthy();
+    }
+    // 全部物理进回收站
+    expect(files.every((f) => !fs.existsSync(f))).toBe(true);
+    // 台账逐条 $R 映射
+    const rows = undo.getBatch(result.op_uuid);
+    expect(rows.filter((r) => r.status === "DONE" && r.recycle_bin_name)).toHaveLength(1000);
+    undo.close();
+  }, 150_000);
 });
 
 describe("parseIFile（合成 $I 字节）", () => {

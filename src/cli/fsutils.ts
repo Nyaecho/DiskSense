@@ -14,6 +14,8 @@ export interface PathSizeResult {
   files: number;
   dirs: number;
   skipped_inaccessible: number;
+  /** 不可访问的路径明细（截断前 10 条），排查用 */
+  skipped_paths: string[];
 }
 
 /** 递归测量任意路径体积（跳过链接）。 */
@@ -24,6 +26,7 @@ export function pathSize(target: string): PathSizeResult {
     files: 0,
     dirs: 0,
     skipped_inaccessible: 0,
+    skipped_paths: [],
   };
   const st = fs.lstatSync(out.path);
   if (!st.isDirectory() || st.isSymbolicLink()) {
@@ -39,6 +42,7 @@ export function pathSize(target: string): PathSizeResult {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       out.skipped_inaccessible++;
+      if (out.skipped_paths.length < 10) out.skipped_paths.push(dir);
       continue;
     }
     for (const e of entries) {
@@ -53,6 +57,7 @@ export function pathSize(target: string): PathSizeResult {
           out.files++;
         } catch {
           out.skipped_inaccessible++;
+          if (out.skipped_paths.length < 10) out.skipped_paths.push(full);
         }
       }
     }
@@ -94,6 +99,8 @@ export interface SearchResult {
   total_dirs_matched: number;
   total_files_matched: number;
   skipped_inaccessible: number;
+  /** 不可访问的路径明细（截断前 10 条），排查用 */
+  skipped_paths: string[];
 }
 
 /**
@@ -129,6 +136,7 @@ export function searchDirs(
     total_dirs_matched: 0,
     total_files_matched: 0,
     skipped_inaccessible: 0,
+    skipped_paths: [],
   };
   const absRoot = path.resolve(root);
   const ignored = (name: string) => matchIgnore(name, ignorePatterns);
@@ -141,6 +149,7 @@ export function searchDirs(
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       result.skipped_inaccessible++;
+      if (result.skipped_paths.length < 10) result.skipped_paths.push(dir);
       continue;
     }
     for (const e of entries) {

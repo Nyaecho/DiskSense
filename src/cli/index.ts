@@ -17,8 +17,16 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { gzipSync } from "node:zlib";
 
-import { ensureDataDirs, loadConfig, dataHome, normalizeTarget, rulesFile } from "../config.js";
+import {
+  ensureDataDirs,
+  loadConfig,
+  dataHome,
+  normalizeTarget,
+  rulesFile,
+  exportDir,
+} from "../config.js";
 import { elevateAndWait, isAdmin, ElevateCancelled } from "../elevate.js";
 import { Preferences } from "../preferences.js";
 import { classifyMagicNumber } from "../magic.js";
@@ -107,8 +115,16 @@ function sleepSync(ms: number): void {
 // ---------------------------------------------------------------------------
 // 扫描与查询
 // ---------------------------------------------------------------------------
-/** 把扫描结果聚合并落盘，返回响应 JSON（start_scan 与提权子进程共用）。 */
-function finishScan(drive: string, result: Awaited<ReturnType<typeof scan>>): Record<string, unknown> {
+/** 把扫描结果聚合并落盘，返回响应 JSON（start_scan 与提权子进程共用）。
+ *
+ * stdout 默认只输出摘要（summary + 实体 Top10 + result_file 落盘路径），
+ * 完整指纹档案 gzip 写入 export 目录，需要全量时加 --full 或直接读文件。
+ */
+function finishScan(
+  drive: string,
+  result: Awaited<ReturnType<typeof scan>>,
+  full = false
+): Record<string, unknown> {
   const cfg = loadConfig();
   void cfg;
   const prefs = prefsInstance();
@@ -124,10 +140,28 @@ function finishScan(drive: string, result: Awaited<ReturnType<typeof scan>>): Re
     fingerprint,
     entityDetail: Object.fromEntries(agg.entityTopFiles),
   });
+  // 完整指纹 gzip 落盘：避免 100KB+ JSON 直接刷屏（Agent 可按需读文件）
+  const resultFile = path.join(exportDir(), `${sessionId}.fingerprint.json.gz`);
+  fs.mkdirSync(exportDir(), { recursive: true });
+  fs.writeFileSync(resultFile, gzipSync(JSON.stringify(fingerprint), { level: 6 }));
+  const entities = Array.isArray(fingerprint["entities"])
+    ? (fingerprint["entities"] as Record<string, unknown>[])
+    : [];
   return {
     status: "completed",
     session_id: sessionId,
-    result: fingerprint,
+    result_file: resultFile,
+    ...(full
+      ? { result: fingerprint }
+      : {
+          summary: fingerprint["summary"],
+          entities_top: entities.slice(0, 10).map((e) => ({
+            id: e["id"],
+            display: e["display"],
+            total_size_mb: e["total_size_mb"],
+          })),
+          note: "摘要模式：完整指纹已落盘 result_file（gzip JSON）；加 --full 可直接输出全量",
+        }),
     // 覆盖预警：旧 live 会话已自动归档（零拷贝），可作 diff_sessions 基线
     ...(archived ? { old_session_archived: archived.session_id } : {}),
   };
@@ -146,21 +180,52 @@ export function shouldElevateFor(drivePath: string): boolean {
   return !isAdmin();
 }
 
+/** 非交互上下文探测：无 TTY 或命中常见 CI 环境变量（UAC 弹窗无人应答会挂死）。 */
+export function isNonInteractive(): boolean {
+  if (!process.stdout.isTTY) return true;
+  const ciVars = ["CI", "GITHUB_ACTIONS", "TF_BUILD", "JENKINS_URL", "GITLAB_CI", "AGENT_ID"];
+  return ciVars.some((k) => process.env[k] !== undefined);
+}
+
+/** 归一化提权策略参数（auto：仅交互式 TTY 且非 CI 时弹 UAC）。 */
+export function resolveElevateMode(v: string | boolean | undefined): "auto" | "never" | "always" {
+  if (v === undefined) return "auto";
+  if (typeof v === "boolean") return v ? "always" : "never";
+  const s = String(v).toLowerCase();
+  if (s === "auto" || s === "never" || "always") return s as "auto" | "never" | "always";
+  fail(`非法 --elevate 值: ${v}（可选 auto|never|always）`);
+}
+
 program
   .command("start_scan")
-  .description("启动磁盘/目录扫描，同步等待完成并返回指纹档案 JSON")
-  .requiredOption("--drive <path>")
-  .option("--no-elevate", "禁用自动 UAC 提权（非管理员时静默降级 walk 扫描）")
+  .description("启动磁盘/目录扫描，同步等待完成；默认输出摘要，完整指纹见 result_file（--full 输出全量）")
+  .option("--drive <path>", "扫描目标：盘符（如 C:）或任意目录绝对路径")
+  .option("--path <path>", "--drive 别名（传目录路径时语义更自然）")
+  .option("--elevate <mode>", "提权策略 auto|never|always（默认 auto：非交互/CI 自动跳过 UAC）", "auto")
+  .option("--full", "stdout 输出完整指纹档案（默认仅摘要 + result_file 落盘路径）")
   .action(async (opts) => {
     ensureDataDirs();
+    const drive: string = opts.drive ?? opts.path;
+    if (!drive) fail("--drive（或别名 --path）必填");
+    const elevateMode = resolveElevateMode(opts.elevate);
     const elevWarnings: string[] = [];
-    // 自动提权：本地固定盘 + 非管理员 → UAC 拉起提权子进程走 MFT 快速路径
-    if (opts.elevate && shouldElevateFor(opts.drive)) {
+    // 自动提权：auto 模式下仅「本地固定盘 + 非管理员 + 交互式 TTY 非 CI」才弹 UAC；
+    // 非交互上下文（Agent/CI）弹 UAC 无人应答会挂死整个流程，静默走 walk 降级
+    const wantElevate =
+      elevateMode === "always"
+        ? !isAdmin()
+        : elevateMode === "auto" && !isNonInteractive() && shouldElevateFor(drive);
+    if (wantElevate) {
       const outFile = path.join(os.tmpdir(), `disk-sense-elevated-${process.pid}-${Date.now()}.json`);
       let exitCode = 0;
       try {
         exitCode = elevateAndWait([
-          "_elevated-scan", "--drive", String(opts.drive), "--out", outFile,
+          "_elevated-scan",
+          "--drive",
+          String(drive),
+          "--out",
+          outFile,
+          ...(opts.full ? ["--full"] : []),
         ]);
       } catch (e) {
         elevWarnings.push(
@@ -185,11 +250,11 @@ program
     try {
       const cfg = loadConfig();
       const prefs = prefsInstance();
-      const result = await scan(opts.drive, {
+      const result = await scan(drive, {
         cfg: cfg.scan,
         ignoreGlobs: prefs.ignorePatterns,
       });
-      const payload = finishScan(opts.drive, result);
+      const payload = finishScan(drive, result, Boolean(opts.full));
       if (elevWarnings.length > 0) payload["warnings"] = elevWarnings;
       out(payload);
     } catch (e) {
@@ -209,6 +274,7 @@ program
   .command("_elevated-scan", { hidden: true })
   .requiredOption("--drive <path>")
   .requiredOption("--out <file>")
+  .option("--full", "输出完整指纹（与父进程 --full 对应）")
   .action(async (opts) => {
     ensureDataDirs();
     try {
@@ -218,7 +284,7 @@ program
         cfg: cfg.scan,
         ignoreGlobs: prefs.ignorePatterns,
       });
-      const payload = JSON.stringify(finishScan(opts.drive, result));
+      const payload = JSON.stringify(finishScan(opts.drive, result, Boolean(opts.full)));
       fs.writeFileSync(opts.out, payload.endsWith("\n") ? payload : `${payload}\n`, "utf-8");
     } catch (e) {
       // 失败也写错误 JSON，父进程可透传
@@ -241,7 +307,8 @@ program
     const s = requireSession(opts);
     const detail = queryDetail(s, opts.entity_id, opts.category);
     if (detail === null) fail(`实体不存在或无明细: ${opts.entity_id}`);
-    out(Array.isArray(detail) ? detail : detail);
+    // 统一信封：{status, data}（与其他命令一致，便于调用方解析）
+    out({ status: "ok", data: detail });
   });
 
 program
@@ -484,6 +551,8 @@ interface ExecOpts {
   strict?: boolean;
   /** commander 将 --dry-run 映射为 camelCase 的 dryRun */
   dryRun?: boolean;
+  /** commander 将 --allow-stale 映射为 camelCase 的 allowStale */
+  allowStale?: boolean;
   session?: string;
 }
 
@@ -501,50 +570,126 @@ async function executeOperationHandler(opts: ExecOpts): Promise<void> {
     fail(`--sources 解析失败: ${e instanceof Error ? e.message : e}`);
   }
 
-  // ---- 预检（执行时防线）：存在性 + mtime 与快照比对 ----
+  // ---- 预检（执行时防线）：存在性 + 快照一致性（目录比子项清单，文件比 mtime）----
   const warnings: string[] = [];
+  /** 磁盘存在但不在快照内（或无会话）的源：放行执行，但显式披露未经快照校验 */
+  const unverified: string[] = [];
+  /** 本工具已处理过、幂等重跑无害的源（节点带 stale 标记 = 有操作历史） */
+  const staleIdempotent: string[] = [];
+  /** 快照中已知、但无本工具操作历史、磁盘已消失的源（疑似外部变更） */
+  const staleConflicts: string[] = [];
   const session = opts.session ? loadSessionById(opts.session) : loadLatestSession();
   if (session) {
     for (const src of sources) {
       const node = findNode(session, src);
       const exists = fs.existsSync(src);
       if (!exists) {
-        if (node) {
-          // 快照中存在但磁盘上已消失：无论是否有操作历史都是硬冲突
-          warnings.push(`${src}: 快照中存在但当前不存在（可能已被移动/删除），标记 stale_conflict`);
+        if (node && node.stale) {
+          // 本工具已处理过该路径（删除/移动成功后标 stale）：幂等重跑，放行并披露
+          staleIdempotent.push(src);
+          warnings.push(
+            `${src}: 本工具已处理过该路径（快照标 stale），幂等重跑放行，将由执行层标 skipped`
+          );
+        } else if (node) {
+          // 快照中存在但磁盘上已消失，且无本工具操作历史：外部变更，默认硬冲突
+          staleConflicts.push(src);
+          warnings.push(
+            `${src}: 快照中存在但当前不存在且无本工具操作史（可能被外部移动/删除），标记 stale_conflict`
+          );
         } else {
           warnings.push(`${src}: 当前不存在`);
         }
         continue;
       }
-      if (node && node.mtime > 0 && !node.stale) {
+      if (!node) {
+        unverified.push(src);
+        continue;
+      }
+      if (node.stale) continue; // 子树已标 stale，存在性已确认即可
+      if (node.isDir) {
+        // 目录 mtime 任何直接子项变动都会刷新，直接比对必然误报；
+        // 改比「直接子项名清单」：增/删子项才是与本操作相关的真信号
+        const snapKids = new Set(
+          Object.keys(node.children ?? {}).map((k) => k.toLowerCase())
+        );
+        let actualKids: string[] = [];
+        try {
+          actualKids = fs.readdirSync(src).map((n) => n.toLowerCase());
+        } catch {
+          /* 不可读目录：交由操作自身报错 */
+        }
+        const actualSet = new Set(actualKids);
+        const added = actualKids.filter((k) => !snapKids.has(k));
+        const removed = [...snapKids].filter((k) => !actualSet.has(k));
+        if (added.length > 0 || removed.length > 0) {
+          const fmt = (xs: string[]) =>
+            xs.length <= 5
+              ? `[${xs.join(", ")}]`
+              : `[${xs.slice(0, 5).join(", ")} 等 ${xs.length} 项]`;
+          warnings.push(
+            `${src}: 子项清单与快照不一致（新增 ${fmt(added)}；消失 ${fmt(removed)}），目录内容在扫描后已变化`
+          );
+        }
+      } else if (node.mtime > 0) {
         const actualMtime = fs.statSync(src).mtimeMs / 1000;
-        if (Math.abs(actualMtime - node.mtime) > 2) {
-          warnings.push(`${src}: mtime 与快照不一致（快照后已被修改）`);
+        const delta = actualMtime - node.mtime;
+        if (Math.abs(delta) > 2) {
+          warnings.push(
+            `${src}: mtime 与快照不一致（快照 ${Math.round(node.mtime)} → 当前 ${Math.round(
+              actualMtime
+            )}，${delta > 0 ? `+${Math.round(delta)}s` : `${Math.round(delta)}s`}），文件内容在扫描后已被修改`
+          );
         }
       }
     }
-    if (warnings.some((w) => w.includes("stale_conflict"))) {
-      fail("预检发现源路径已在快照后消失（stale_conflict），请先 rescan 再操作", {
-        warnings,
-      });
+    // stale_conflict 分类：外部变更默认整批拒绝（铁律 4 误操作防线）；
+    // --allow-stale 显式降级为逐条 skipped（用户确认「这些就是我要重跑的残留」）；
+    // dry-run 不拒绝——预演的意义就是提前看到冲突与降级后果
+    if (staleConflicts.length > 0 && !opts.allowStale && !opts.dryRun) {
+      fail(
+        `预检发现 ${staleConflicts.length} 个源在快照后消失且无本工具操作史（stale_conflict），` +
+          "请先 rescan，或确认外部变更后用 --allow-stale 降级为逐条跳过",
+        { warnings, stale_conflicts: staleConflicts }
+      );
     }
-    if (opts.strict && warnings.length > 0) {
+    if (opts.strict && warnings.length > 0 && !opts.dryRun) {
       fail("严格模式：预检发现不一致，已拒绝操作", { warnings });
+    }
+  } else {
+    // 无会话：所有源均未经快照校验（小批量清理可直接执行，返回中如实披露）
+    for (const src of sources) {
+      if (fs.existsSync(src)) unverified.push(src);
     }
   }
 
-  // ---- 预演模式：预检 + 体积预估，不执行任何操作 ----
+  // ---- 预演模式：预检 + 体积预估 + 回收站落位/目标冲突，不执行任何操作 ----
   if (opts.dryRun) {
     const items = sources.map((s) => {
       let bytes = 0;
-      try {
+      let isDir = false;
+      let recycleDrive: string | null = null;
+      let destConflict: boolean | null = null;
+      const ok = fs.existsSync(s);
+      if (ok) {
         const st = fs.statSync(s);
-        bytes = st.isDirectory() ? pathSize(s).total_bytes : Number(st.size);
-      } catch {
-        /* 预检已报告缺失项 */
+        isDir = st.isDirectory();
+        bytes = isDir ? pathSize(s).total_bytes : Number(st.size);
+        if (opts.op_type === "delete") {
+          recycleDrive = path.parse(path.resolve(s)).root;
+        }
+        if ((opts.op_type === "move" || opts.op_type === "copy") && opts.dest) {
+          const target = path.join(opts.dest, path.basename(s.replace(/[\\/]+$/, "")));
+          destConflict = fs.existsSync(target);
+        }
       }
-      return { source: s, exists: fs.existsSync(s), bytes };
+      return {
+        source: s,
+        exists: ok,
+        is_dir: isDir,
+        bytes,
+        ...(recycleDrive !== null ? { recycle_drive: recycleDrive } : {}),
+        ...(destConflict === null ? {} : { dest_conflict: destConflict }),
+      };
     });
     out({
       status: "dry_run",
@@ -552,9 +697,21 @@ async function executeOperationHandler(opts: ExecOpts): Promise<void> {
       dest: opts.dest ?? null,
       items,
       total_bytes: items.reduce((acc, it) => acc + it.bytes, 0),
+      ...(unverified.length > 0 ? { unverified } : {}),
+      ...(staleIdempotent.length > 0 ? { stale_idempotent: staleIdempotent } : {}),
+      ...(staleConflicts.length > 0
+        ? {
+            stale_conflicts: staleConflicts,
+            stale_hint: opts.allowStale
+              ? "--allow-stale 已指定：正式执行时这些源将降级为逐条 skipped"
+              : "未指定 --allow-stale：正式执行将整批拒绝（stale_conflict），需先 rescan 或加 --allow-stale",
+          }
+        : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
       note:
-        "预演模式：未执行任何操作。delete 场景 total_bytes 即预计可释放空间" +
-        "（删除走回收站，清空回收站后才真正释放）。",
+        "预演模式：未执行任何操作。delete 的 total_bytes 为预计移入回收站的体积" +
+        "（落位盘符见 recycle_drive；磁盘占用需 empty_recycle_bin 后才真正释放）；" +
+        "move/copy 的 dest_conflict=true 表示目标位置已有同名项。",
     });
     return;
   }
@@ -565,20 +722,47 @@ async function executeOperationHandler(opts: ExecOpts): Promise<void> {
       const prefs = prefsInstance();
       const op = new FileOperator(undo, (p) => prefs.isProtected(p), session?.session_id ?? null);
 
+      // 幂等重跑的跳过原因注入：让逐条 error 精确说明「已处理过」而非通用文案
+      const skipReasons = Object.fromEntries(
+        staleIdempotent.map((p) => [
+          p,
+          "本工具已处理过该路径（快照标 stale，幂等重跑），无需重复操作",
+        ])
+      );
+
       let result;
-      if (opts.op_type === "delete") result = op.delete(sources);
-      else if (opts.op_type === "move") result = op.move(sources, opts.dest ?? "");
-      else if (opts.op_type === "copy") result = op.copy(sources, opts.dest ?? "");
+      if (opts.op_type === "delete") result = op.delete(sources, { skipReasons });
+      else if (opts.op_type === "move")
+        result = op.move(sources, opts.dest ?? "", { skipReasons });
+      else if (opts.op_type === "copy")
+        result = op.copy(sources, opts.dest ?? "", { skipReasons });
       else result = op.compress(sources, opts.dest);
 
-      // 新鲜度记账（成功时）：op_count++ / recent_ops / 子树 stale 标记
-      if (result.status === "completed") {
-        recordOperationForSources(opts.op_type.toUpperCase(), sources, result.op_uuid);
+      // 新鲜度记账（成功或部分成功时）：op_count++ / recent_ops / 子树 stale 标记
+      if (result.status === "completed" || result.status === "partial") {
+        const doneSources =
+          result.results?.filter((r) => r.status === "done").map((r) => r.source) ?? sources;
+        recordOperationForSources(
+          opts.op_type.toUpperCase(),
+          doneSources.length > 0 ? doneSources : sources,
+          result.op_uuid
+        );
         if ((opts.op_type === "move" || opts.op_type === "copy") && opts.dest) {
           recordOperationForSources(`${opts.op_type.toUpperCase()}_DEST`, [opts.dest], result.op_uuid);
         }
       }
-      return { ...(result as object), ...(warnings.length ? { warnings } : {}) } as Record<string, unknown>;
+      return {
+        ...(result as object),
+        ...(unverified.length > 0 ? { unverified } : {}),
+        ...(staleIdempotent.length > 0
+          ? {
+              stale_idempotent: staleIdempotent,
+              stale_idempotent_note:
+                "这些源已被本工具处理过（幂等重跑），执行层已标 skipped，非错误",
+            }
+          : {}),
+        ...(warnings.length ? { warnings } : {}),
+      } as Record<string, unknown>;
     } finally {
       undo.close();
     }
@@ -617,8 +801,9 @@ program
   .option("--dest <dir>")
   .option("--async", "大体积操作异步模式（立即返回 job_id）")
   .option("--wait", "配合 --async：轮询直到结束")
-  .option("--strict", "严格预检：mtime 不一致即拒绝")
+  .option("--strict", "严格预检：任何不一致即拒绝")
   .option("--dry-run", "预演：只做预检与体积预估，不执行任何操作")
+  .option("--allow-stale", "stale_conflict 降级：快照内消失的源改为逐条 skipped（默认整批拒绝）")
   .option("--session <id>")
   .action(async (opts) => {
     if (opts.async && opts.wait) {
@@ -679,7 +864,8 @@ program
   .action((opts) => {
     const undo = undoInstance();
     try {
-      out(undo.listOps(Number(opts.limit)));
+      // 统一信封：{status, data}（与其他命令一致，便于调用方解析）
+      out({ status: "ok", data: undo.listOps(Number(opts.limit)) });
     } finally {
       undo.close();
     }

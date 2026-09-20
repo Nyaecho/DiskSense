@@ -31,7 +31,46 @@ function datetimeNow(): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+// ---------------------------------------------------------------------------
+// 批量分片（导出供单测）
+// ---------------------------------------------------------------------------
+/**
+ * SHFileOperationW 的 pFrom/pTo 为双 NUL 结尾多字符串，受 MAX_PATH 级
+ * 缓冲限制（实测超 32K 字符整批失败且无逐条错误）。内部按盘符分组后、
+ * 在「30K 字符 + 400 条」双预算内切片，单片失败不影响其余片。
+ */
+export const CHUNK_CHAR_LIMIT = 30_000;
+export const CHUNK_COUNT_LIMIT = 400;
 
+export function chunkSources(sources: readonly string[]): string[][] {
+  const byDrive = new Map<string, string[]>();
+  for (const s of sources) {
+    const root = path.parse(path.resolve(s)).root;
+    const arr = byDrive.get(root) ?? [];
+    arr.push(s);
+    byDrive.set(root, arr);
+  }
+  const chunks: string[][] = [];
+  for (const list of byDrive.values()) {
+    let cur: string[] = [];
+    let chars = 0;
+    for (const s of list) {
+      const need = s.length + 1;
+      if (
+        cur.length > 0 &&
+        (chars + need > CHUNK_CHAR_LIMIT || cur.length >= CHUNK_COUNT_LIMIT)
+      ) {
+        chunks.push(cur);
+        cur = [];
+        chars = 0;
+      }
+      cur.push(s);
+      chars += need;
+    }
+    if (cur.length > 0) chunks.push(cur);
+  }
+  return chunks;
+}
 // ---------------------------------------------------------------------------
 // shutil.move / copy2 等价物
 // ---------------------------------------------------------------------------
@@ -98,21 +137,30 @@ function moveInto(src: string, destDir: string): string {
 
 export interface OpResultEntry {
   source: string;
-  status: "done" | "failed";
+  status: "done" | "failed" | "skipped";
   dest?: string;
   recycle_bin_name?: string | null;
-  /** 删除成功时：该条目释放的字节数（与 empty_recycle_bin 口径一致） */
+  /** 删除成功时：该条目移入回收站的字节数（目录为递归实测内容总量） */
+  moved_bytes?: number;
+  /** @deprecated 1.1.x 兼容别名 = moved_bytes；真正释放只发生在 empty_recycle_bin */
   freed_bytes?: number;
+  /** failed/skipped 的原因（逐条必带，绝不静默失败） */
   error?: string;
 }
 
 export interface OperationResult {
   op_uuid: string;
-  status: "completed" | "failed";
+  status: "completed" | "partial" | "failed";
   error?: string;
   results: OpResultEntry[];
-  /** 全部成功条目累计释放字节数（delete 操作） */
+  /** 删除操作：成功条目移入回收站的总字节（磁盘占用未变，需清空回收站才释放） */
+  moved_bytes?: number;
+  /** @deprecated 1.1.x 兼容别名 = moved_bytes；真正释放用 empty_recycle_bin 的 freed_bytes */
   freed_bytes?: number;
+  /** 语义说明（delete 返回） */
+  note?: string;
+  /** 批量结果汇总（total/done/failed/skipped） */
+  summary?: { total: number; done: number; failed: number; skipped: number };
 }
 
 export class FileOperator {
@@ -154,110 +202,199 @@ export class FileOperator {
     }
   }
 
-  /** 删除到回收站并捕获精确 $R 映射。 */
-  delete(sources: readonly string[]): OperationResult {
-    sources = sources.filter(Boolean);
-    this.checkProtection(sources);
-    const missing = sources.filter((s) => !fs.existsSync(s));
-    if (missing.length > 0) throw new FileOperatorError(`源路径不存在: ${missing[0]}`);
-
-    const opUuid = randomUUID();
-    const sizes = new Map<string, number>();
-    const entries = sources.map((s) => {
-      const [size, mtime] = FileOperator.statOf(s);
-      if (size !== null) sizes.set(s, size);
-      return this.entry(s, undefined, size, mtime);
-    });
-    const ids = this.undo.logBatch(opUuid, "DELETE", entries, this.sessionId);
-
-    // 按盘符分组快照回收站（删除前）。键为盘根（带分隔符）。
-    const snapshots = new Map<string, Map<string, string>>();
-    for (const s of sources) {
-      const parsed = path.parse(path.resolve(s));
-      const driveRoot = `${parsed.root}`;
-      if (driveRoot && !snapshots.has(driveRoot)) {
-        snapshots.set(driveRoot, snapshotRecycleI(driveRoot));
-      }
-    }
-
-    let results: OpResultEntry[] = [];
+  /**
+   * 操作时刻的真实体积：目录递归实测内容总量（st.size 对目录只是
+   * 目录条目自身大小，通常 0~64KB，合账/审计均不可用）；文件取
+   * st.size；不可访问时返回 null。跳过符号链接防死循环。
+   */
+  private static contentSizeOf(p: string): number | null {
     try {
-      shFileOperation(FO_DELETE, sources);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      ids.forEach((id, i) =>
-        this.undo.updateEntry(id, { status: "FAILED", error_msg: msg })
-      );
-      return {
-        op_uuid: opUuid,
-        status: "failed",
-        error: msg,
-        results: sources.map((s) => ({ source: s, status: "failed" as const })),
-      };
+      const st = fs.lstatSync(p);
+      if (!st.isDirectory() || st.isSymbolicLink()) return Number(st.size);
+    } catch {
+      return null;
     }
-
-    // 比对快照 → 解析新增 $I → 按原始路径精确映射。
-    // Shell 返回后 $I 可能尚未对目录枚举可见，轮询至收集齐或超时。
-    let newItems = new Map<string, import("./recycle-bin.js").IFileInfo>();
-    for (let attempt = 0; attempt < 8; attempt++) {
-      newItems = new Map();
-      for (const [root, before] of snapshots) {
-        for (const m of diffNewI(root, before)) {
-          newItems.set(normPath(m.original_path), m);
+    let total = 0;
+    const stack: string[] = [p];
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue; // 子目录不可访问：计入已测得部分
+      }
+      for (const e of entries) {
+        if (e.isSymbolicLink()) continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          stack.push(full);
+        } else {
+          try {
+            total += Number(fs.lstatSync(full).size);
+          } catch {
+            /* 单文件不可统计：忽略 */
+          }
         }
       }
-      if (newItems.size >= sources.length) break;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
     }
+    return total;
+  }
 
-    ids.forEach((id, i) => {
-      const s = sources[i]!;
-      const m = newItems.get(normPath(s));
-      if (fs.existsSync(s)) {
-        this.undo.updateEntry(id, { status: "FAILED", error_msg: "删除后源路径仍存在" });
-        results.push({ source: s, status: "failed", error: "删除未生效" });
-      } else {
-        const fields: Record<string, unknown> = { status: "DONE" };
-        if (m) {
-          fields.recycle_bin_name = path.basename(m.r_path!);
-          fields.recycle_info_name = path.basename(m.i_path!);
-          fields.recycle_path = m.r_path;
-        }
-        this.undo.updateEntry(id, fields);
-        results.push({
-          source: s,
-          status: "done",
-          recycle_bin_name: (fields.recycle_bin_name as string) ?? null,
-          freed_bytes: sizes.get(s) ?? 0,
-        });
+  /** 删除到回收站并捕获精确 $R 映射。
+   *
+   * 批量语义：
+   * - 缺失源**不中止全批**：逐条标 skipped 并带原因（可选 opts.skipReasons
+   *   注入调用方已知的原因，如 CLI 预检判定的幂等重跑）；
+   * - 内部按盘符自动分片（SHFileOperationW 的 pFrom 多字符串有 32,767 字符
+   *   上限，大批量一次调用必超限失败），单片失败只影响该片，其余片继续；
+   * - 每片独立「快照→删除→比对」，错误逐条带 error 字段，绝不静默失败。
+   */
+  delete(
+    sources: readonly string[],
+    opts?: { skipReasons?: Record<string, string> }
+  ): OperationResult {
+    const batch = sources.filter(Boolean);
+    this.checkProtection(batch);
+    const opUuid = randomUUID();
+
+    // 日志先落（含 skipped 条目，审计完整），sizes 记录操作时刻真实体积
+    const sizes = new Map<string, number>();
+    const entries: LogEntry[] = [];
+    const skipped: { src: string; reason: string }[] = [];
+    for (const s of batch) {
+      const size = FileOperator.contentSizeOf(s);
+      const mtime = FileOperator.statOf(s)[1];
+      if (size !== null) sizes.set(s, size);
+      entries.push(this.entry(s, undefined, size, mtime));
+      if (!fs.existsSync(s)) {
+        const reason = opts?.skipReasons?.[s] ?? "源路径不存在（可能已被移动/删除）";
+        skipped.push({ src: s, reason });
       }
+    }
+    const ids = this.undo.logBatch(opUuid, "DELETE", entries, this.sessionId);
+    const skipSet = new Set(skipped.map((k) => k.src));
+    const pending = batch.filter((s) => !skipSet.has(s));
+
+    const results: OpResultEntry[] = [];
+    // skipped 条目：日志标 SKIPPED，结果逐条披露
+    batch.forEach((s, i) => {
+      const hit = skipped.find((k) => k.src === s);
+      if (!hit) return;
+      this.undo.updateEntry(ids[i]!, { status: "SKIPPED", error_msg: hit.reason });
+      results.push({ source: s, status: "skipped", error: hit.reason });
     });
+
+    // 按盘符分组 → 预算内切片（pFrom 30K 字符 + 单片 400 条双限制）
+    const chunks = chunkSources(pending);
+
+    // 每片独立：快照回收站 → SHFileOperation → 比对新增 $I → 精确映射
+    const idOf = new Map(batch.map((s, i) => [s, ids[i]!]));
+    for (const chunk of chunks) {
+      // 分组快照（删除前，按片内涉及的盘）
+      const snapshots = new Map<string, Map<string, string>>();
+      for (const s of chunk) {
+        const driveRoot = path.parse(path.resolve(s)).root;
+        if (!snapshots.has(driveRoot)) {
+          snapshots.set(driveRoot, snapshotRecycleI(driveRoot));
+        }
+      }
+
+      let shellErrorMsg: string | null = null;
+      try {
+        shFileOperation(FO_DELETE, chunk);
+      } catch (e) {
+        shellErrorMsg = e instanceof Error ? e.message : String(e);
+      }
+
+      // 比对快照 → 解析新增 $I → 按原始路径精确映射。
+      // Shell 返回后 $I 可能尚未对目录枚举可见，轮询至收集齐或超时。
+      let newItems = new Map<string, import("./recycle-bin.js").IFileInfo>();
+      if (shellErrorMsg === null) {
+        for (let attempt = 0; attempt < 8; attempt++) {
+          newItems = new Map();
+          for (const [root, before] of snapshots) {
+            for (const m of diffNewI(root, before)) {
+              newItems.set(normPath(m.original_path), m);
+            }
+          }
+          if (newItems.size >= chunk.length) break;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+        }
+      }
+
+      for (const s of chunk) {
+        const id = idOf.get(s)!;
+        const m = newItems.get(normPath(s));
+        if (fs.existsSync(s)) {
+          const reason = shellErrorMsg ?? "删除后源路径仍存在";
+          this.undo.updateEntry(id, { status: "FAILED", error_msg: reason });
+          results.push({ source: s, status: "failed", error: reason });
+        } else {
+          const fields: Record<string, unknown> = { status: "DONE" };
+          if (m) {
+            fields.recycle_bin_name = path.basename(m.r_path!);
+            fields.recycle_info_name = path.basename(m.i_path!);
+            fields.recycle_path = m.r_path;
+          }
+          this.undo.updateEntry(id, fields);
+          results.push({
+            source: s,
+            status: "done",
+            recycle_bin_name: (fields.recycle_bin_name as string) ?? null,
+            moved_bytes: sizes.get(s) ?? 0,
+            freed_bytes: 0, // 进回收站不释放磁盘占用；真正释放在 empty_recycle_bin
+          });
+        }
+      }
+    }
+
+    const doneCount = results.filter((r) => r.status === "done").length;
+    const failedCount = results.filter((r) => r.status === "failed").length;
+    const skippedCount = results.filter((r) => r.status === "skipped").length;
     return {
       op_uuid: opUuid,
-      status: "completed",
-      freed_bytes: results.reduce((acc, r) => acc + (r.freed_bytes ?? 0), 0),
+      status: failedCount > 0 ? "partial" : "completed",
+      moved_bytes: results.reduce((acc, r) => acc + (r.moved_bytes ?? 0), 0),
+      freed_bytes: 0,
       results,
+      summary: { total: batch.length, done: doneCount, failed: failedCount, skipped: skippedCount },
+      note:
+        `共 ${batch.length} 项：成功 ${doneCount}、失败 ${failedCount}、跳过 ${skippedCount}。` +
+        "已移入回收站（可撤销）；磁盘占用未释放，empty_recycle_bin 后才真正释放",
     };
   }
 
-  /** move/copy 共用传输流程。 */
+  /** move/copy 共用传输流程（缺失源逐条跳过披露，不中止全批）。 */
   private transfer(
     opType: "MOVE" | "COPY",
     sources: readonly string[],
     dest: string | null | undefined,
-    fn: (src: string, destDir: string) => string
+    fn: (src: string, destDir: string) => string,
+    skipReasons?: Record<string, string>
   ): OperationResult {
-    sources = sources.filter(Boolean);
-    this.checkProtection(sources);
+    const batch = sources.filter(Boolean);
+    this.checkProtection(batch);
     if (!dest || !fs.existsSync(dest) || !fs.statSync(dest).isDirectory()) {
       throw new FileOperatorError(`目标目录不存在: ${dest}`);
     }
     const opUuid = randomUUID();
     const results: OpResultEntry[] = [];
 
-    for (const s of sources) {
-      if (!fs.existsSync(s)) throw new FileOperatorError(`源路径不存在: ${s}`);
-      const [size, mtime] = FileOperator.statOf(s);
+    for (const s of batch) {
+      if (!fs.existsSync(s)) {
+        // 单源缺失不中止全批：逐条标 skipped 并披露原因（优先调用方注入）
+        const reason =
+          skipReasons?.[s] ?? "源路径不存在（可能已被移动/删除）";
+        const [skipId] = this.undo.logBatch(
+          opUuid, opType, [this.entry(s, null, null, null)], this.sessionId
+        );
+        this.undo.updateEntry(skipId!, { status: "SKIPPED", error_msg: reason });
+        results.push({ source: s, status: "skipped", error: reason });
+        continue;
+      }
+      const size = FileOperator.contentSizeOf(s);
+      const mtime = FileOperator.statOf(s)[1];
       const final = path.join(dest, path.basename(s.replace(/[\\/]+$/, "")));
       const [entryId] = this.undo.logBatch(
         opUuid, opType, [this.entry(s, final, size, mtime)], this.sessionId
@@ -273,27 +410,58 @@ export class FileOperator {
         results.push({ source: s, status: "failed", error: msg });
       }
     }
-    return { op_uuid: opUuid, status: "completed", results };
+    const done = results.filter((r) => r.status === "done").length;
+    const failed = results.filter((r) => r.status === "failed").length;
+    const skippedN = results.filter((r) => r.status === "skipped").length;
+    return {
+      op_uuid: opUuid,
+      status: failed > 0 ? "partial" : "completed",
+      results,
+      summary: { total: batch.length, done, failed, skipped: skippedN },
+    };
   }
 
   /** 移动（撤销 = 从 dest 移回原位）。 */
-  move(sources: readonly string[], dest: string): OperationResult {
-    return this.transfer("MOVE", sources, dest, moveInto);
+  move(
+    sources: readonly string[],
+    dest: string,
+    opts?: { skipReasons?: Record<string, string> }
+  ): OperationResult {
+    return this.transfer("MOVE", sources, dest, moveInto, opts?.skipReasons);
   }
 
   /** 复制（撤销 = 副本送入回收站）。 */
-  copy(sources: readonly string[], dest: string): OperationResult {
-    return this.transfer("COPY", sources, dest, copyInto);
+  copy(
+    sources: readonly string[],
+    dest: string,
+    opts?: { skipReasons?: Record<string, string> }
+  ): OperationResult {
+    return this.transfer("COPY", sources, dest, copyInto, opts?.skipReasons);
   }
 
-  /** 压缩为 ZIP（DEFLATE）。destDir 缺省为第一个源所在目录。 */
+  /** 压缩为 ZIP（DEFLATE）。destDir 缺省为第一个存在源所在目录；缺失源跳过披露。 */
   compress(sources: readonly string[], destDir?: string | null): OperationResult {
-    sources = sources.filter(Boolean);
-    this.checkProtection(sources);
-    const missing = sources.filter((s) => !fs.existsSync(s));
-    if (missing.length > 0) throw new FileOperatorError(`源路径不存在: ${missing[0]}`);
-    destDir = destDir || path.dirname(path.resolve(sources[0]!));
-    const base = path.basename(sources[0]!.replace(/[\\/]+$/, ""));
+    const batch = sources.filter(Boolean);
+    this.checkProtection(batch);
+    const missing = batch.filter((s) => !fs.existsSync(s));
+    const present = batch.filter((s) => fs.existsSync(s));
+    const skipReason = "源路径不存在（可能已被移动/删除），未参与压缩";
+    if (present.length === 0) {
+      // 全部缺失：无法定位输出目录，整批披露后返回
+      const opUuid = randomUUID();
+      const entries = batch.map((s) => this.entry(s, null, null, null));
+      const ids = this.undo.logBatch(opUuid, "COMPRESS", entries, this.sessionId);
+      ids.forEach((id) => this.undo.updateEntry(id, { status: "SKIPPED", error_msg: skipReason }));
+      return {
+        op_uuid: opUuid,
+        status: "failed",
+        error: `全部源路径不存在，无法压缩（首个: ${batch[0] ?? ""}）`,
+        results: batch.map((s) => ({ source: s, status: "skipped" as const, error: skipReason })),
+        summary: { total: batch.length, done: 0, failed: 0, skipped: batch.length },
+      };
+    }
+    destDir = destDir || path.dirname(path.resolve(present[0]!));
+    const base = path.basename(present[0]!.replace(/[\\/]+$/, ""));
     const stem = base.includes(".") && !base.startsWith(".") ? base.slice(0, base.lastIndexOf(".")) : base;
     let zipPath = path.join(destDir, `${stem}.zip`);
     let n = 1;
@@ -304,14 +472,20 @@ export class FileOperator {
 
     const opUuid = randomUUID();
     const entries: LogEntry[] = [];
-    for (const s of sources) {
-      const [size, mtime] = FileOperator.statOf(s);
+    for (const s of present) {
+      const size = FileOperator.contentSizeOf(s);
+      const mtime = FileOperator.statOf(s)[1];
       entries.push(this.entry(s, zipPath, size, mtime));
     }
     const ids = this.undo.logBatch(opUuid, "COMPRESS", entries, this.sessionId);
+    // 缺失源日志补录（SKIPPED，审计完整）
+    for (const s of missing) {
+      const [id] = this.undo.logBatch(opUuid, "COMPRESS", [this.entry(s, null, null, null)], this.sessionId);
+      this.undo.updateEntry(id!, { status: "SKIPPED", error_msg: skipReason });
+    }
     try {
       const zip = new AdmZip();
-      for (const s of sources) {
+      for (const s of present) {
         const abs = path.resolve(s);
         if (fs.statSync(abs).isDirectory()) {
           const parentOfSrc = path.dirname(abs.replace(/[\\/]+$/, ""));
@@ -323,10 +497,15 @@ export class FileOperator {
       zip.writeZip(zipPath);
       const total = fs.statSync(zipPath).size;
       for (const id of ids) this.undo.updateEntry(id, { status: "DONE", file_size: total });
+      const results: OpResultEntry[] = [
+        ...present.map((s) => ({ source: s, dest: zipPath, status: "done" as const })),
+        ...missing.map((s) => ({ source: s, status: "skipped" as const, error: skipReason })),
+      ];
       return {
         op_uuid: opUuid,
         status: "completed",
-        results: sources.map((s) => ({ source: s, dest: zipPath, status: "done" as const })),
+        results,
+        summary: { total: batch.length, done: present.length, failed: 0, skipped: missing.length },
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -458,6 +637,10 @@ export function executeUndo(opId: number, undo: UndoManager): UndoResult {
     // 步骤 1：状态锁定
     if (row.status === "UNDONE") {
       skipped.push({ id: row.id, source: row.source_path, reason: "此操作已撤销过" });
+      continue;
+    }
+    if (row.status === "SKIPPED") {
+      skipped.push({ id: row.id, source: row.source_path, reason: "原操作被跳过（源缺失），无可回滚内容" });
       continue;
     }
     if (row.status === "FAILED") {

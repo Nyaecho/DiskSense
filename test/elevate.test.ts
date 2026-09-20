@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { buildElevatedArgs, isAdmin, quoteArg } from "../src/elevate.js";
-import { shouldElevateFor } from "../src/cli/index.js";
+import { isNonInteractive, resolveElevateMode, shouldElevateFor } from "../src/cli/index.js";
 
 describe("buildElevatedArgs", () => {
   it("生产模式：入口 + 参数", () => {
@@ -65,6 +65,29 @@ describe("isAdmin / shouldElevateFor", () => {
   it("非 Windows 恒不触发", () => {
     if (process.platform !== "win32") {
       expect(shouldElevateFor("C:\\")).toBe(false);
+    }
+  });
+});
+
+describe("resolveElevateMode / isNonInteractive", () => {
+  it("三档解析 + 旧布尔归一（--no-elevate 兼容）", () => {
+    expect(resolveElevateMode(undefined)).toBe("auto");
+    expect(resolveElevateMode("auto")).toBe("auto");
+    expect(resolveElevateMode("never")).toBe("never");
+    expect(resolveElevateMode("always")).toBe("always");
+    // commander 的 --no-elevate 会传 false / 显式 --elevate 传 true
+    expect(resolveElevateMode(false)).toBe("never");
+    expect(resolveElevateMode(true)).toBe("always");
+  });
+
+  it("CI 环境变量触发非交互判定", () => {
+    const saved = process.env["CI"];
+    process.env["CI"] = "1";
+    try {
+      expect(isNonInteractive()).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env["CI"];
+      else process.env["CI"] = saved;
     }
   });
 });
